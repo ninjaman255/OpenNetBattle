@@ -26,7 +26,7 @@ TitleScene::TitleScene(swoosh::ActivityController& controller, TaskGroup&& tasks
 {
   // Title screen logo based on region
   std::shared_ptr<sf::Texture> logo;
-  
+
   if (getController().CommandLineValue<std::string>("locale") == "jp") {
     logo = Textures().LoadFromFile("resources/scenes/title/tile.png");
   }
@@ -78,6 +78,8 @@ void TitleScene::onStart()
 
 void TitleScene::onUpdate(double elapsed)
 {
+  totalElapsed += elapsed;
+
   // scroll the bg
   sf::IntRect offset = bgSprite.getTextureRect();
   offset.top += 1;
@@ -95,7 +97,7 @@ void TitleScene::onUpdate(double elapsed)
       progress++;
     }
 
-    std::string percent = std::to_string(this->progress) + "%";
+    std::string percent = std::to_string(progress) + "%";
     std::string label = taskStr + ": " + percent + dots;
     startLabel.SetString(label);
 
@@ -118,13 +120,13 @@ void TitleScene::onUpdate(double elapsed)
     PlayerPackageManager& pm = getController().PlayerPackagePartitioner().GetPartition(Game::LocalPartition);
 
     if (pm.Size() == 0) {
-      std::string path = "resources/ow/prog/";
+      std::filesystem::path path("resources/ow/prog");
       std::string msg = "Looks like you need a Player Mod to continue.\nDownload one and put it under:\n\n`resources/\n mods/\n players/`\nThen re-launch to start playing!";
       sf::Sprite spr;
-      spr.setTexture(*Textures().LoadFromFile(path+"prog_mug.png"));
+      spr.setTexture(*Textures().LoadFromFile(path / "prog_mug.png"));
       currMessage = new Message(msg);
       currMessage->ShowEndMessageCursor();
-      textbox.EnqueMessage(spr, path + "prog_mug.animation", currMessage);
+      textbox.EnqueMessage(spr, path / "prog_mug.animation", currMessage);
       textbox.Open();
       Audio().Play(AudioType::CHIP_DESC, AudioPriority::high);
     }
@@ -149,12 +151,23 @@ void TitleScene::onUpdate(double elapsed)
     return;
   }
 
+  if (pressedStart) {
+    if (fastStartFlicker > frames(0)) {
+      fastStartFlicker -= from_seconds(elapsed);
+    }
+    else {
+      // We want the next screen to be the main menu screen
+      using tx = segue<DiamondTileCircle>::to<Overworld::Homepage>;
+      getController().push<tx>();
+      leaving = true;
+      return;
+    }
+  }
+
   if (Input().Has(InputEvents::pressed_pause) && !pressedStart) {
     pressedStart = true;
-
-    // We want the next screen to be the main menu screen
-    using tx = segue<DiamondTileCircle>::to<Overworld::Homepage>;
-    getController().push<tx>();
+    Audio().Play(AudioType::NEW_GAME);
+    Audio().StopStream();
   }
 }
 
@@ -181,7 +194,21 @@ void TitleScene::onDraw(sf::RenderTexture & surface)
   surface.draw(bgSprite);
   surface.draw(progSprite);
   surface.draw(logoSprite);
-  surface.draw(startLabel);
+
+  // blink when ready
+  unsigned min = pressedStart ? 5 : 30;
+  unsigned max = pressedStart ? 10 : 60;
+  unsigned frame = from_seconds(totalElapsed).count() % max;
+  if ((frame < min || progress < 100) && !leaving) {
+    sf::Vector2f lastPos = startLabel.getPosition();
+    startLabel.setPosition(lastPos.x + 2.f, lastPos.y + 2.f);
+    startLabel.SetColor(sf::Color::Black);
+    surface.draw(startLabel);
+    startLabel.setPosition(lastPos);
+    startLabel.SetColor(sf::Color::White);
+    surface.draw(startLabel);
+  }
+
   surface.draw(textbox);
 }
 

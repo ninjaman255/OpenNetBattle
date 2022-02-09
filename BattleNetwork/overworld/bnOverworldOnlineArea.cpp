@@ -3,14 +3,10 @@
 #include <Segues/PixelateBlackWashFade.h>
 #include <Segues/BlackWashFade.h>
 #include <Segues/WhiteWashFade.h>
-#include <Segues/BlendFadeIn.h>
+#include <Segues/VerticalOpen.h>
 #include <Poco/Net/NetException.h>
 
-// TODO: mac os < 10.5 file system support...
-#ifndef __APPLE__
 #include <filesystem>
-#endif 
-
 #include <fstream>
 
 #include "bnOverworldOnlineArea.h"
@@ -21,8 +17,13 @@
 #include "../bnGameSession.h"
 #include "../bnMath.h"
 #include "../bnMobPackageManager.h"
+#include "../bnLuaLibraryPackageManager.h"
 #include "../bnPlayerPackageManager.h"
 #include "../bnBlockPackageManager.h"
+#include "../bindings/bnScriptedCard.h"
+#include "../bindings/bnLuaLibrary.h"
+#include "../bindings/bnScriptedPlayer.h"
+#include "../bindings/bnScriptedBlock.h"
 #include "../bnMessageQuestion.h"
 #include "../bnPlayerCustScene.h"
 #include "../bnSelectNaviScene.h"
@@ -107,7 +108,11 @@ Overworld::OnlineArea::OnlineArea(
   player->AddNode(emoteNode);
 
   // ensure the existence of these package partitions
+  getController().BlockPackagePartitioner().CreateNamespace(Game::ServerPartition);
+  getController().CardPackagePartitioner().CreateNamespace(Game::ServerPartition);
   getController().MobPackagePartitioner().CreateNamespace(Game::ServerPartition);
+  getController().LuaLibraryPackagePartitioner().CreateNamespace(Game::ServerPartition);
+  getController().PlayerPackagePartitioner().CreateNamespace(Game::ServerPartition);
 }
 
 Overworld::OnlineArea::~OnlineArea()
@@ -122,7 +127,8 @@ std::optional<Overworld::OnlineArea::AbstractUser> Overworld::OnlineArea::GetAbs
       nullptr,
       emoteNode,
       GetTeleportController(),
-      propertyAnimator
+      propertyAnimator,
+      true
     };
   }
 
@@ -136,7 +142,8 @@ std::optional<Overworld::OnlineArea::AbstractUser> Overworld::OnlineArea::GetAbs
       onlinePlayer.marker,
       onlinePlayer.emoteNode,
       onlinePlayer.teleportController,
-      onlinePlayer.propertyAnimator
+      onlinePlayer.propertyAnimator,
+      onlinePlayer.solid
     };
   }
 
@@ -151,10 +158,8 @@ void Overworld::OnlineArea::AddSceneChangeTask(const std::function<void()>& task
 
 void Overworld::OnlineArea::SetAvatarAsSpeaker() {
   PlayerMeta& meta = getController().PlayerPackagePartitioner().GetPartition(Game::LocalPartition).FindPackageByID(GetCurrentNaviID());
-  const std::string& image = meta.GetMugshotTexturePath();
-  const std::string& anim = meta.GetMugshotAnimationPath();
-  std::shared_ptr<sf::Texture> mugshot = Textures().LoadFromFile(image);
-  GetMenuSystem().SetNextSpeaker(sf::Sprite(*mugshot), anim);
+  std::shared_ptr<sf::Texture> mugshot = Textures().LoadFromFile(meta.GetMugshotTexturePath());
+  GetMenuSystem().SetNextSpeaker(sf::Sprite(*mugshot), meta.GetMugshotAnimationPath());
 }
 
 void Overworld::OnlineArea::onUpdate(double elapsed)
@@ -242,7 +247,11 @@ void Overworld::OnlineArea::ResetPVPStep(bool failed)
 
 void Overworld::OnlineArea::RemovePackages() {
   Logger::Log(LogLevel::debug, "Removing server packages");
+  getController().BlockPackagePartitioner().GetPartition(Game::ServerPartition).ClearPackages();
+  getController().CardPackagePartitioner().GetPartition(Game::ServerPartition).ClearPackages();
   getController().MobPackagePartitioner().GetPartition(Game::ServerPartition).ClearPackages();
+  getController().LuaLibraryPackagePartitioner().GetPartition(Game::ServerPartition).ClearPackages();
+  getController().PlayerPackagePartitioner().GetPartition(Game::ServerPartition).ClearPackages();
 }
 
 void Overworld::OnlineArea::updateOtherPlayers(double elapsed) {
@@ -474,7 +483,7 @@ void Overworld::OnlineArea::detectWarp() {
       sf::Vector2f player_pos = { player->getPosition().x, player->getPosition().y };
       float distance = std::pow(targetWorldPos.x - player_pos.x, 2.0f) + std::pow(targetWorldPos.y - player_pos.y, 2.0f);
 
-      // this is a magic number - this is about as close to 2 warps that are 8 blocks away vertically 
+      // this is a magic number - this is about as close to 2 warps that are 8 blocks away vertically
       // (expression is also squared)
       if (distance < 40'000) {
         warpCameraController.QueueWaneCamera(map.WorldToScreen(targetPosition), interpolateTime, 0.55f);
@@ -617,6 +626,7 @@ void Overworld::OnlineArea::onEnd()
   }
 
   getController().Session().SetWhitelist({}); // clear the whitelist
+  // getController().Session().SetBlacklist({}); // clear the blacklist
 
   if (!transferringServers) {
     // clear packages when completing the return to the homepage
@@ -664,23 +674,26 @@ void Overworld::OnlineArea::OnTileCollision() { }
 
 void Overworld::OnlineArea::OnInteract(Interaction type) {
   auto& map = GetMap();
+  auto tileSize = map.GetTileSize();
+
   auto playerActor = GetPlayer();
+  auto frontPosition = playerActor->PositionInFrontOf();
 
   // check to see what tile we pressed talk to
   auto layerIndex = playerActor->GetLayer();
-  auto& layer = map.GetLayer(layerIndex);
-  auto tileSize = map.GetTileSize();
 
-  auto frontPosition = playerActor->PositionInFrontOf();
+  if (layerIndex >= 0 && layerIndex < map.GetLayerCount()) {
+    auto& layer = map.GetLayer(layerIndex);
 
-  for (auto& tileObject : layer.GetTileObjects()) {
-    auto interactable = tileObject.visible || tileObject.solid;
+    for (auto& tileObject : layer.GetTileObjects()) {
+      auto interactable = tileObject.visible || tileObject.solid;
 
-    if (interactable && tileObject.Intersects(map, frontPosition.x, frontPosition.y)) {
-      sendObjectInteractionSignal(tileObject.id, type);
+      if (interactable && tileObject.Intersects(map, frontPosition.x, frontPosition.y)) {
+        sendObjectInteractionSignal(tileObject.id, type);
 
-      // block other interactions with return
-      return;
+        // block other interactions with return
+        return;
+      }
     }
   }
 
@@ -780,9 +793,7 @@ void Overworld::OnlineArea::transferServer(const std::string& host, uint16_t por
       Net().GetMaxPayloadSize()
       );
 
-    packetProcessor->SetStatusHandler([=](auto status, auto maxPayloadSize) {
-      Net().DropProcessor(packetProcessor);
-
+    packetProcessor->SetStatusHandler([this, host, port, data, handleFail, packetProcessor = packetProcessor.get()](auto status, auto maxPayloadSize) {
       if (status == ServerStatus::online) {
         AddSceneChangeTask([=] {
           RemovePackages();
@@ -792,6 +803,8 @@ void Overworld::OnlineArea::transferServer(const std::string& host, uint16_t por
       else {
         handleFail();
       }
+
+      Net().DropProcessor(packetProcessor);
     });
 
     Net().AddHandler(remoteAddress, packetProcessor);
@@ -958,8 +971,14 @@ void Overworld::OnlineArea::processPacketBody(const Poco::Buffer<char>& data)
     case ServerEvents::load_package:
       receiveLoadPackageSignal(reader, data);
       break;
+    case ServerEvents::package_offer:
+      receivePackageOfferSignal(reader, data);
+      break;
     case ServerEvents::mod_whitelist:
       receiveModWhitelistSignal(reader, data);
+      break;
+    case ServerEvents::mod_blacklist:
+      receiveModBlacklistSignal(reader, data);
       break;
     case ServerEvents::initiate_mob:
       receiveMobSignal(reader, data);
@@ -1004,19 +1023,49 @@ void Overworld::OnlineArea::processPacketBody(const Poco::Buffer<char>& data)
 
 void Overworld::OnlineArea::CheckPlayerAgainstWhitelist()
 {
-
+  // Check if the current navi is compatible
   PlayerPackagePartitioner& partitioner = getController().PlayerPackagePartitioner();
+  PlayerPackageManager& packages = partitioner.GetPartition(Game::LocalPartition);
   std::string& id = GetCurrentNaviID();
   PackageAddress addr = { Game::LocalPartition, id };
 
   if (!partitioner.HasPackage(addr)) return;
-  
+
   const std::string& md5 = partitioner.FindPackageByAddress(addr).GetPackageFingerprint();
 
-  if (getController().Session().IsPackageAllowed({ id, md5 })) return;
+  GameSession& session = getController().Session();
+  if (session.IsPackageAllowed({ id, md5 })) return;
 
-  // Take player to navi select screen with a message
-  getController().push<segue<BlackWashFade>::to<SelectNaviScene>>(id);
+  // Otherwise check to see if the player has any compatible mods
+  bool anyCompatible = false;
+
+  std::string next_id = packages.GetPackageAfter(id);
+
+  while (next_id != id) {
+    std::string next_md5 = packages.FindPackageByID(next_id).GetPackageFingerprint();
+    if (session.IsPackageAllowed({ next_id, next_md5 })) {
+      anyCompatible = true;
+      break;
+    }
+
+    next_id = packages.GetPackageAfter(next_id);
+  }
+
+  if (anyCompatible) {
+    // If so, take player to navi select screen with a message
+    getController().push<segue<BlackWashFade>::to<SelectNaviScene>>(id);
+    return;
+  }
+
+  // Else, inform the player they will be kicked
+  auto onComplete = [this] {
+    auto& command = GetTeleportController().TeleportOut(GetPlayer());
+    command.onFinish.Slot([this] {
+      getController().pop<segue<PixelateBlackWashFade>>();
+    });
+  };
+  std::string message = "This server detects none of your installed navis are allowed.\nReturning to your homepage.";
+  this->GetMenuSystem().EnqueueMessage(message, onComplete);
 }
 
 void Overworld::OnlineArea::sendAssetFoundSignal(const std::string& path, uint64_t lastModified) {
@@ -1163,16 +1212,15 @@ void Overworld::OnlineArea::sendAvatarChangeSignal()
   packetProcessor->SendPacket(Reliability::ReliableOrdered, buffer);
 }
 
-static std::vector<char> readBytes(std::string texturePath) {
+static std::vector<char> readBytes(std::filesystem::path texturePath) {
   size_t textureLength;
   std::vector<char> textureData;
 
-#ifndef __APPLE__
   try {
     textureLength = std::filesystem::file_size(texturePath);
   }
   catch (std::filesystem::filesystem_error& e) {
-    Logger::Logf(LogLevel::critical, "Failed to read texture \"%s\": %s", texturePath.c_str(), e.what());
+    Logger::Logf(LogLevel::critical, "Failed to read texture \"%s\": %s", texturePath.u8string().c_str(), e.what());
     return textureData;
   }
 
@@ -1186,9 +1234,8 @@ static std::vector<char> readBytes(std::string texturePath) {
     textureData.insert(textureData.begin(), std::istream_iterator<char>(fin), std::istream_iterator<char>());
   }
   catch (std::ifstream::failure& e) {
-    Logger::Logf(LogLevel::critical, "Failed to read texture \"%s\": %s", texturePath.c_str(), e.what());
+    Logger::Logf(LogLevel::critical, "Failed to read texture \"%s\": %s", texturePath.u8string().c_str(), e.what());
   }
-#endif
 
   return textureData;
 }
@@ -1199,20 +1246,16 @@ void Overworld::OnlineArea::sendAvatarAssetStream() {
 
   auto& naviMeta = getController().PlayerPackagePartitioner().GetPartition(Game::LocalPartition).FindPackageByID(GetCurrentNaviID());
 
-  auto texturePath = naviMeta.GetOverworldTexturePath();
-  auto textureData = readBytes(texturePath);
+  auto textureData = readBytes(naviMeta.GetOverworldTexturePath());
   sendAssetStreamSignal(ClientAssetType::texture, packetHeaderSize, textureData.data(), textureData.size());
 
-  const auto& animationPath = naviMeta.GetOverworldAnimationPath();
-  std::string animationData = FileUtil::Read(animationPath);
+  std::string animationData = FileUtil::Read(naviMeta.GetOverworldAnimationPath());
   sendAssetStreamSignal(ClientAssetType::animation, packetHeaderSize, animationData.c_str(), animationData.length());
 
-  auto mugshotTexturePath = naviMeta.GetMugshotTexturePath();
-  auto mugshotTextureData = readBytes(mugshotTexturePath);
+  auto mugshotTextureData = readBytes(naviMeta.GetMugshotTexturePath());
   sendAssetStreamSignal(ClientAssetType::mugshot_texture, packetHeaderSize, mugshotTextureData.data(), mugshotTextureData.size());
 
-  const auto& mugshotAnimationPath = naviMeta.GetMugshotAnimationPath();
-  std::string mugshotAnimationData = FileUtil::Read(mugshotAnimationPath);
+  std::string mugshotAnimationData = FileUtil::Read(naviMeta.GetMugshotAnimationPath());
   sendAssetStreamSignal(ClientAssetType::mugshot_animation, packetHeaderSize, mugshotAnimationData.c_str(), mugshotAnimationData.length());
 }
 
@@ -1519,7 +1562,7 @@ void Overworld::OnlineArea::receiveAssetStreamStartSignal(BufferReader& reader, 
   auto lastModified = reader.Read<uint64_t>(buffer);
   auto cachable = reader.Read<bool>(buffer);
   auto type = reader.Read<AssetType>(buffer);
-  auto size = reader.Read<size_t>(buffer);
+  auto size = (size_t)reader.Read<uint64_t>(buffer);
 
   auto slashIndex = name.rfind("/");
   std::string shortName;
@@ -1778,6 +1821,9 @@ void Overworld::OnlineArea::receiveExcludeActorSignal(BufferReader& reader, cons
   this->RemoveSprite(abstractUser.actor);
   this->RemoveSprite(abstractUser.teleportController.GetBeam());
 
+  // prevent collisions with this actor
+  abstractUser.actor->SetSolid(false);
+
   if (abstractUser.marker) {
     abstractUser.marker->Hide();
   }
@@ -1800,6 +1846,9 @@ void Overworld::OnlineArea::receiveIncludeActorSignal(BufferReader& reader, cons
   // remove this actor to make sure they're not added more than once (server script issue)
   this->RemoveSprite(abstractUser.actor);
   this->RemoveSprite(abstractUser.teleportController.GetBeam());
+
+  // enable collisions if they should be on
+  abstractUser.actor->SetSolid(abstractUser.solid);
 
   // include the actor again
   this->AddSprite(abstractUser.actor);
@@ -2255,7 +2304,7 @@ void Overworld::OnlineArea::receivePVPSignal(BufferReader& reader, const Poco::B
     };
 
     returningFrom = ReturningScene::DownloadScene;
-    using effect = swoosh::types::segue<BlendFadeIn>;
+    using effect = swoosh::types::segue<VerticalOpen, milliseconds<500>>;
     getController().push<effect::to<DownloadScene>>(props);
   });
 
@@ -2285,15 +2334,15 @@ void Overworld::OnlineArea::receivePVPSignal(BufferReader& reader, const Poco::B
 
     PackageAddress playerPackage = PackageAddress{ Game::LocalPartition , GetCurrentNaviID() };
     auto& meta = playerPartition.FindPackageByAddress(playerPackage);
-    const std::string& image = meta.GetMugshotTexturePath();
-    const std::string& mugshotAnim = meta.GetMugshotAnimationPath();
-    const std::string& emotionsTexture = meta.GetEmotionsTexturePath();
-    auto mugshot = Textures().LoadFromFile(image);
-    auto emotions = Textures().LoadFromFile(emotionsTexture);
+    std::filesystem::path mugshotAnim = meta.GetMugshotAnimationPath();
+    auto mugshot = Textures().LoadFromFile(meta.GetMugshotTexturePath());
+    auto emotions = Textures().LoadFromFile(meta.GetEmotionsTexturePath());
     auto player = std::shared_ptr<Player>(meta.GetData());
 
-    player->SetHealth(GetPlayerSession()->health);
-    player->SetEmotion(GetPlayerSession()->emotion);
+    auto& overworldSession = GetPlayerSession();
+    player->SetMaxHealth(overworldSession->maxHealth);
+    player->SetHealth(overworldSession->health);
+    player->SetEmotion(overworldSession->emotion);
 
     GameSession& session = getController().Session();
     std::vector<PackageAddress> localNaviBlocks = PlayerCustScene::GetInstalledBlocks(GetCurrentNaviID(), session);
@@ -2335,7 +2384,7 @@ void Overworld::OnlineArea::receivePVPSignal(BufferReader& reader, const Poco::B
 }
 
 template<typename Partitioner>
-static void LoadPackage(Partitioner& partitioner, const std::string& file_path) {
+static void LoadPackage(Partitioner& partitioner, const std::filesystem::path& file_path) {
   auto& packageManager = partitioner.GetPartition(Game::ServerPartition);
 
   std::string packageId = packageManager.FilepathToPackageID(file_path);
@@ -2362,36 +2411,171 @@ void Overworld::OnlineArea::receiveLoadPackageSignal(BufferReader& reader, const
   }
 
   std::string asset_path = reader.ReadString<uint16_t>(buffer);
+  PackageType package_type = reader.Read<PackageType>(buffer);
 
-  std::string file_path = serverAssetManager.GetPath(asset_path);
+  std::filesystem::path file_path = serverAssetManager.GetPath(asset_path);
 
   if (file_path.empty()) {
     Logger::Logf(LogLevel::critical, "Failed to find server asset %s", file_path.c_str());
     return;
   }
 
-  // loading everything as an encounter for now
-  LoadPackage(getController().MobPackagePartitioner(), file_path);
+  switch (package_type) {
+  case PackageType::blocks:
+    LoadPackage(getController().BlockPackagePartitioner(), file_path);
+    break;
+  case PackageType::card:
+    LoadPackage(getController().CardPackagePartitioner(), file_path);
+    break;
+  case PackageType::library:
+    LoadPackage(getController().LuaLibraryPackagePartitioner(), file_path);
+    break;
+  case PackageType::player:
+    LoadPackage(getController().PlayerPackagePartitioner(), file_path);
+    break;
+  default:
+    LoadPackage(getController().MobPackagePartitioner(), file_path);
+  }
 }
 
-void Overworld::OnlineArea::receiveModWhitelistSignal(BufferReader& reader, const Poco::Buffer<char>& buffer)
+template <typename ScriptedType, typename Manager>
+void Overworld::OnlineArea::InstallPackage(Manager& manager, const std::filesystem::path& modFolder, const std::string& packageName, const std::string& packageId, const std::filesystem::path& filePath) {
+  auto& menuSystem = GetMenuSystem();
+
+  SetAvatarAsSpeaker();
+  menuSystem.EnqueueMessage("Installing\x01...");
+
+  manager.ErasePackage(packageId);
+
+  std::filesystem::path installPath = modFolder / ("package-" + URIEncode(packageId) + ".zip");
+
+  try {
+    std::filesystem::copy_file(filePath, installPath);
+  } catch(std::exception& e) {
+    Logger::Logf(LogLevel::critical, "Failed to copy package %s to %s. Reason: %s", packageId.c_str(), installPath.c_str(), e.what());
+    menuSystem.EnqueueMessage("Installation failed.");
+    return;
+  }
+
+  auto res = manager.template LoadPackageFromZip<ScriptedType>(installPath);
+
+  if (res.is_error()) {
+    Logger::Logf(LogLevel::critical, "%s", res.error_cstr());
+    menuSystem.EnqueueMessage("Installation failed.");
+    return;
+  }
+
+  menuSystem.EnqueueMessage(packageName + " successfully installed!");
+}
+
+template <typename ScriptedType, typename Partitioner>
+void Overworld::OnlineArea::RunPackageWizard(Partitioner& partitioner, const std::filesystem::path& modFolder, const std::string& packageName, const std::string& packageId, const std::filesystem::path& filePath)
 {
-  std::string assetPath = reader.ReadString<uint16_t>(buffer);
-  std::string whitelistString = GetText(assetPath);
-  std::string_view whitelistView = whitelistString;
+  auto& localManager = partitioner.GetPartition(Game::LocalPartition);
+
+  bool hasPackage = localManager.HasPackage(packageId);
+
+  // check if the package is already installed
+  if (localManager.HasPackage(packageId)) {
+    stx::result_t<std::string> md5Result = stx::generate_md5_from_file(filePath);
+
+    if (md5Result.is_error()) {
+      Logger::Logf(LogLevel::critical, "Failed to create md5 for %s. Reason: %s", filePath.c_str(), md5Result.error_cstr());
+      return;
+    }
+
+    std::string md5 = md5Result.value();
+
+    if (localManager.FindPackageByID(packageId).fingerprint == md5) {
+      // package already installed
+      return;
+    }
+  }
+
+  // request permission from the player
+  SetAvatarAsSpeaker();
+
+  GetMenuSystem().EnqueueMessage("Receiving data\x01...", [this]() {
+    GetPlayer()->Face(Direction::down_right);
+  });
+
+  GetMenuSystem().EnqueueQuestion(
+    "Received data for " + packageName + " install?",
+    [this, &localManager, hasPackage, modFolder, packageName, packageId, filePath](bool yes) {
+      if (!yes) {
+        return;
+      }
+
+      if (!hasPackage) {
+        InstallPackage<ScriptedType>(localManager, modFolder, packageName, packageId, filePath);
+        return;
+      }
+
+      SetAvatarAsSpeaker();
+      GetMenuSystem().EnqueueQuestion(
+        packageName + " conflicts with an existing package, overwrite?",
+        [this, &localManager, modFolder, packageName, packageId, filePath](bool yes) {
+          if (!yes) {
+            return;
+          }
+
+          InstallPackage<ScriptedType>(localManager, modFolder, packageName, packageId, filePath);
+        }
+      );
+    }
+  );
+}
+
+void Overworld::OnlineArea::RunPackageWizard(PackageType packageType, const std::string& packageName, std::string& packageId, const std::filesystem::path& filePath)
+{
+  // todo: define mod folders in a single location?
+
+  switch (packageType) {
+  case PackageType::blocks:
+    RunPackageWizard<ScriptedBlock>(getController().BlockPackagePartitioner(), "resources/mods/blocks", packageName, packageId, filePath);
+    break;
+  case PackageType::card:
+    RunPackageWizard<ScriptedCard>(getController().CardPackagePartitioner(), "resources/mods/cards", packageName, packageId, filePath);
+    break;
+  case PackageType::library:
+    RunPackageWizard<LuaLibrary>(getController().LuaLibraryPackagePartitioner(), "resources/mods/libs", packageName, packageId, filePath);
+    break;
+  case PackageType::player:
+    RunPackageWizard<ScriptedPlayer>(getController().PlayerPackagePartitioner(), "resources/mods/players", packageName, packageId, filePath);
+    break;
+  default:
+    RunPackageWizard<ScriptedMob>(getController().MobPackagePartitioner(), "resources/mods/enemies", packageName, packageId, filePath);
+  }
+}
+
+void Overworld::OnlineArea::receivePackageOfferSignal(BufferReader& reader, const Poco::Buffer<char>& buffer)
+{
+  PackageType packageType = reader.Read<PackageType>(buffer);
+  std::string packageId = reader.ReadString<uint8_t>(buffer);
+  std::string packageName = reader.ReadString<uint8_t>(buffer);
+  std::filesystem::path filePath = GetPath(reader.ReadString<uint16_t>(buffer));
+
+  if (packageName.empty()) {
+    packageName = "Dependency";
+  }
+
+  RunPackageWizard(packageType, packageName, packageId, filePath);
+}
+
+static std::vector<PackageHash> ParsePackageList(std::string_view packageListView) {
   std::vector<PackageHash> packageHashes;
 
   size_t endLine = 0;
 
   do {
     size_t startLine = endLine;
-    endLine = whitelistView.find("\n", startLine);
+    endLine = packageListView.find("\n", startLine);
 
     if (endLine == string::npos) {
-      endLine = whitelistView.size();
+      endLine = packageListView.size();
     }
 
-    std::string_view lineView = whitelistView.substr(startLine, endLine - startLine);
+    std::string_view lineView = packageListView.substr(startLine, endLine - startLine);
     endLine += 1; // skip past the \n
 
     if (lineView[lineView.size() - 1] == '\r') {
@@ -2404,7 +2588,7 @@ void Overworld::OnlineArea::receiveModWhitelistSignal(BufferReader& reader, cons
     }
 
     size_t spaceIndex = lineView.find(' ');
-    
+
     if (spaceIndex == string::npos) {
       // missing space
       continue;
@@ -2415,11 +2599,31 @@ void Overworld::OnlineArea::receiveModWhitelistSignal(BufferReader& reader, cons
     packageHash.packageId = lineView.substr(33);
 
     packageHashes.push_back(packageHash);
-  } while(endLine < whitelistView.size());
+  } while(endLine < packageListView.size());
+
+  return packageHashes;
+}
+
+void Overworld::OnlineArea::receiveModWhitelistSignal(BufferReader& reader, const Poco::Buffer<char>& buffer)
+{
+  std::string assetPath = reader.ReadString<uint16_t>(buffer);
+  std::string whitelistString = assetPath.empty() ? "" : GetText(assetPath);
+  std::vector<PackageHash> packageHashes = ParsePackageList(whitelistString);
 
   getController().Session().SetWhitelist(packageHashes);
 
   AddSceneChangeTask([this] { CheckPlayerAgainstWhitelist(); });
+}
+
+void Overworld::OnlineArea::receiveModBlacklistSignal(BufferReader& reader, const Poco::Buffer<char>& buffer)
+{
+  std::string assetPath = reader.ReadString<uint16_t>(buffer);
+  std::string blacklistString = assetPath.empty() ? "" : GetText(assetPath);
+  std::vector<PackageHash> packageHashes = ParsePackageList(blacklistString);
+
+  // getController().Session().SetBlacklist(packageHashes);
+
+  // AddSceneChangeTask([this] { CheckPlayerAgainstWhitelist(); });
 }
 
 void Overworld::OnlineArea::receiveMobSignal(BufferReader& reader, const Poco::Buffer<char>& buffer)
@@ -2430,10 +2634,10 @@ void Overworld::OnlineArea::receiveMobSignal(BufferReader& reader, const Poco::B
     return;
   }
 
-  std::string asset_path = reader.ReadString<uint16_t>(buffer);
+  std::string asset_name = reader.ReadString<uint16_t>(buffer);
   std::string data_path = reader.ReadString<uint16_t>(buffer);
 
-  std::string file_path = serverAssetManager.GetPath(asset_path);
+  std::filesystem::path file_path = serverAssetManager.GetPath(asset_name);
 
   if (file_path.empty()) {
     Logger::Logf(LogLevel::critical, "Failed to find server mob asset %s", file_path.c_str());
@@ -2462,21 +2666,20 @@ void Overworld::OnlineArea::receiveMobSignal(BufferReader& reader, const Poco::B
     // Play the pre battle rumble sound
     Audio().Play(AudioType::PRE_BATTLE, AudioPriority::high);
 
-    // Stop music and go to battle screen 
+    // Stop music and go to battle screen
     Audio().StopStream();
 
     // Get the navi we selected
     PlayerMeta& playerMeta = playerPackages.FindPackageByID(GetCurrentNaviID());
-    const std::string& image = playerMeta.GetMugshotTexturePath();
-    const std::string& mugshotAnim = playerMeta.GetMugshotAnimationPath();
-    const std::string& emotionsTexture = playerMeta.GetEmotionsTexturePath();
-    std::shared_ptr<sf::Texture> mugshot = Textures().LoadFromFile(image);
-    std::shared_ptr<sf::Texture> emotions = Textures().LoadFromFile(emotionsTexture);
+    std::filesystem::path mugshotAnim = playerMeta.GetMugshotAnimationPath();
+    std::shared_ptr<sf::Texture> mugshot = Textures().LoadFromFile(playerMeta.GetMugshotTexturePath());
+    std::shared_ptr<sf::Texture> emotions = Textures().LoadFromFile(playerMeta.GetEmotionsTexturePath());
     std::shared_ptr<Player> player = std::shared_ptr<Player>(playerMeta.GetData());
 
-    auto& playerSession = GetPlayerSession();
-    player->SetHealth(playerSession->health);
-    player->SetEmotion(playerSession->emotion);
+    auto& overworldSession = GetPlayerSession();
+    player->SetMaxHealth(overworldSession->maxHealth);
+    player->SetHealth(overworldSession->health);
+    player->SetEmotion(overworldSession->emotion);
 
     CardFolder* newFolder = nullptr;
 
@@ -2617,6 +2820,9 @@ void Overworld::OnlineArea::receiveActorConnectedSignal(BufferReader& reader, co
   emoteNode->setScale(0.5f, 0.5f);
   emoteNode->LoadCustomEmotes(customEmotesTexture);
 
+  onlinePlayer.solid = solid;
+  actor->SetSolid(solid);
+
   auto& teleportController = onlinePlayer.teleportController;
 
   auto isExcluded = excludedActors.find(user) != excludedActors.end();
@@ -2626,11 +2832,12 @@ void Overworld::OnlineArea::receiveActorConnectedSignal(BufferReader& reader, co
     teleportController.EnableSound(false);
 
     actor->AddNode(emoteNode);
-    actor->SetSolid(solid);
     actor->CollideWithMap(false);
     actor->SetCollisionRadius(6);
     actor->SetInteractCallback([=](const std::shared_ptr<Actor>& with, Interaction type) {
-      sendNaviInteractionSignal(ticket, type);
+      if (excludedActors.find(user) == excludedActors.end()) {
+        sendNaviInteractionSignal(ticket, type);
+      }
     });
 
     AddActor(actor);
@@ -2646,6 +2853,7 @@ void Overworld::OnlineArea::receiveActorConnectedSignal(BufferReader& reader, co
       // remove the actor if they are marked as hidden by the server
       RemoveSprite(actor);
       marker->Hide();
+      actor->SetSolid(false);
     }
     else {
       // add the teleport beam if the actor is not marked as hidden by the server
@@ -2900,10 +3108,10 @@ void Overworld::OnlineArea::receiveActorKeyFramesSignal(BufferReader& reader, co
         propertyStep.value = (float)Orthographic(reader.Read<Direction>(buffer));
         break;
       case ActorProperty::sound_effect:
-        propertyStep.stringValue = GetPath(reader.ReadString<uint16_t>(buffer));
+        propertyStep.stringValue = GetPath(reader.ReadString<uint16_t>(buffer)).u8string();
         break;
       case ActorProperty::sound_effect_loop:
-        propertyStep.stringValue = GetPath(reader.ReadString<uint16_t>(buffer));
+        propertyStep.stringValue = GetPath(reader.ReadString<uint16_t>(buffer)).u8string();
         break;
       default:
         propertyStep.value = reader.Read<float>(buffer);
@@ -2969,7 +3177,7 @@ std::shared_ptr<sf::SoundBuffer> Overworld::OnlineArea::GetAudio(const std::stri
   return Overworld::SceneBase::GetAudio(path);
 }
 
-std::string Overworld::OnlineArea::GetPath(const std::string& path) {
+std::filesystem::path Overworld::OnlineArea::GetPath(const std::string& path) {
   if (path.find("/server", 0) == 0) {
     return serverAssetManager.GetPath(path);
   }

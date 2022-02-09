@@ -80,6 +80,7 @@ class BattleSceneBase :
   public CardActionUseListener {
 private:
   // general stuff
+  bool skipFrame{ false };
   bool quitting{ false }; //!< Determine if we are leaving the battle scene
   bool didDoubleDelete{ false }; /*!< Flag if player double deleted this frame */
   bool didTripleDelete{ false }; /*!< Flag if player tripled deleted this frame */
@@ -98,7 +99,7 @@ private:
   int randBG; /*!< If background provided by Mob data is nullptr, randomly select one */
   int lastRedTeamMobSize{ 0 }, lastBlueTeamMobSize{ 0 };
   int newRedTeamMobSize{ 0 }, newBlueTeamMobSize{ 0 };
-  unsigned int frameNumber{ 0 };
+  frame_time_t frameNumber{ 0 };
   double elapsed{ 0 }; /*!< total time elapsed in battle */
   double customProgress{ 0 }; /*!< Cust bar progress in seconds */
   double customDuration{ 10.0 }; /*!< Cust bar max time in seconds */
@@ -114,6 +115,7 @@ private:
   PA& programAdvance; /*!< PA object loads PA database and returns matching PA card from input */
   std::shared_ptr<Field> field{ nullptr }; /*!< Supplied by mob info: the grid to battle on */
   std::shared_ptr<Player> localPlayer; /*!< Local player */
+  std::vector<Entity::ID_t> deletingRedMobs, deletingBlueMobs; /*!< mobs untrack enemies but we need to know when they fully finish deleting*/
   std::vector<std::shared_ptr<Player>> otherPlayers; /*!< Player array supports multiplayer */
   std::map<Player*, TrackedFormData> allPlayerFormsHash;
   std::map<Player*, Team> allPlayerTeamHash; /*!< Check previous frames teams for traitors */
@@ -144,9 +146,9 @@ private:
   CardSelectionCust cardCustGUI; /*!< Card selection GUI that has an API to interact with */
 
   // sprites
-  swoosh::Timer comboInfoTimer; /*!< How long the info should stay on screen */
-  swoosh::Timer multiDeleteTimer; /*!< Deletions start a 12 frame timer to count towards combos */
-  swoosh::Timer battleTimer; /*!< Total duration of active battle time */
+  frame_time_stopwatch_t comboInfoTimer; /*!< How long the info should stay on screen */
+  frame_time_stopwatch_t multiDeleteTimer; /*!< Deletions start a 12 frame timer to count towards combos */
+  frame_time_stopwatch_t battleTimer; /*!< Total duration of active battle time */
 
   // shader fx
   double shaderCooldown;
@@ -277,7 +279,7 @@ protected:
   */
   void ProcessNewestComponents();
   void FlushLocalPlayerInputQueue();
-  std::vector<InputEvent> ProcessLocalPlayerInputQueue(const frame_time_t& lag = frames(0));
+  std::vector<InputEvent> ProcessLocalPlayerInputQueue(unsigned int lag = 0, bool gatherInput = true);
   void OnCardActionUsed(std::shared_ptr<CardAction> action, uint64_t timestamp) override final;
   void OnCounter(Entity& victim, Entity& aggressor) override final;
   void OnSpawnEvent(std::shared_ptr<Character>& spawned) override final;
@@ -320,13 +322,13 @@ public:
 
   /**
     * @brief State boolean for BattleScene. Query if the battle is over.
-    * @return true if all mob enemies are marked as deleted
+    * @return true if all mob enemies are marked as deleted and removed from field.
     */
   const bool IsRedTeamCleared() const;
 
   /**
   * @brief State boolean for BattleScene. Query if the battle is over.
-  * @return true if all mob enemies are marked as deleted
+  * @return true if all mob enemies are marked as deleted and removed from field.
   */
   const bool IsBlueTeamCleared() const;
 
@@ -371,16 +373,20 @@ public:
   virtual void onDraw(sf::RenderTexture& surface) override;
   virtual void onEnd() override;
 
+  // Define what happens on scenes that need to inspect pre-filtered card selections
+  virtual void OnSelectNewCards(const std::shared_ptr<Player>& player, std::vector<Battle::Card>& cards) {};
+
   void DrawWithPerspective(sf::Sprite& sprite, sf::RenderTarget& surf);
   void DrawWithPerspective(sf::Shape& shape, sf::RenderTarget& surf);
   void DrawWithPerspective(Text& text, sf::RenderTarget& surf);
   void PerspectiveFlip(bool flipped);
-  bool TrackOtherPlayer(std::shared_ptr<Player> other);
-  void UntrackOtherPlayer(std::shared_ptr<Player> other);
-
+  bool TrackOtherPlayer(std::shared_ptr<Player>& other);
+  void UntrackOtherPlayer(std::shared_ptr<Player>& other);
+  void UntrackMobCharacter(std::shared_ptr<Character>& character);
   bool IsPlayerDeleted() const;
 
   std::shared_ptr<Player> GetLocalPlayer();
+  const std::shared_ptr<Player> GetLocalPlayer() const;
   std::vector<std::shared_ptr<Player>> GetOtherPlayers();
   std::vector<std::shared_ptr<Player>> GetAllPlayers();
   std::shared_ptr<Field> GetField();
@@ -394,15 +400,16 @@ public:
   const BattleSceneState* GetCurrentState() const;
   const int GetTurnCount();
   const int GetRoundCount();
-  const unsigned int FrameNumber() const;
+  const frame_time_t FrameNumber() const;
   void StartBattleStepTimer();
   void StopBattleStepTimer();
   void BroadcastBattleStart();
   void BroadcastBattleStop();
   virtual void IncrementTurnCount();
   virtual void IncrementRoundCount();
+  void SkipFrame();
   void IncrementFrame();
-  const sf::Time GetElapsedBattleTime();
+  const frame_time_t GetElapsedBattleFrames();
 
   const bool FadeInBackdrop(double amount, double to, bool affectBackground);
   const bool FadeOutBackdrop(double amount);
@@ -413,7 +420,7 @@ public:
   /**
     @brief Crude support card filter step
   */
-  void FilterSupportCards(std::vector<Battle::Card>& cards);
+  void FilterSupportCards(const std::shared_ptr<Player>& player, std::vector<Battle::Card>& cards);
 
   /*
       \brief Forces the creation a fadeout state onto the state pointer and goes back to the last scene

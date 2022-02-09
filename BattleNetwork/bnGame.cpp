@@ -14,6 +14,7 @@
 #include "bnText.h"
 #include "bnResourceHandle.h"
 #include "bnInputHandle.h"
+#include "bnRandom.h"
 #include "overworld/bnOverworldHomepage.h"
 #include "SFML/System.hpp"
 
@@ -41,7 +42,7 @@ char* Game::RemotePartition = "pvp";
 char* Game::ServerPartition = "server";
 
 Game::Game(DrawWindow& window) :
-  window(window), 
+  window(window),
   reader("config.ini"),
   configSettings(),
   netManager(),
@@ -50,7 +51,7 @@ Game::Game(DrawWindow& window) :
   shaderManager(),
   inputManager(*window.GetRenderWindow()),
   ActivityController(*window.GetRenderWindow()) {
-  
+
   // figure out system endianness
   {
     int n = 1;
@@ -93,7 +94,7 @@ Game::Game(DrawWindow& window) :
   session->SetCardPackageManager(cardPackagePartitioner->GetPartition(Game::LocalPartition));
   session->SetBlockPackageManager(blockPackagePartitioner->GetPartition(Game::LocalPartition));
 
-  // Use the engine's window settings for this platform to create a properly 
+  // Use the engine's window settings for this platform to create a properly
   // sized render surface...
   unsigned int win_x = static_cast<unsigned int>(window.GetView().getSize().x);
   unsigned int win_y = static_cast<unsigned int>(window.GetView().getSize().y);
@@ -106,12 +107,10 @@ Game::Game(DrawWindow& window) :
 }
 
 Game::~Game() {
+  Exit();
+
   if (renderThread.joinable()) {
     renderThread.join();
-  }
-
-  if (recordOutThread.joinable()) {
-    recordOutThread.join();
   }
 
   delete session;
@@ -149,7 +148,7 @@ void Game::SetCommandLineValues(const cxxopts::ParseResult& values) {
   commandline = &values;
   commandlineArgs = values.arguments();
 
-  // Now that we have CLI values, we can configure 
+  // Now that we have CLI values, we can configure
   // other subsystems that need to read from them...
   unsigned int myPort = CommandLineValue<int>("port");
   uint16_t maxPayloadSize = CommandLineValue<uint16_t>("mtu");
@@ -209,10 +208,6 @@ TaskGroup Game::Boot(const cxxopts::ParseResult& values)
     inputManager.BindLoseFocusEvent(std::bind(&Game::LoseFocus, this));
     inputManager.BindRegainFocusEvent(std::bind(&Game::GainFocus, this));
     inputManager.BindResizedEvent(std::bind(&Game::Resize, this, std::placeholders::_1, std::placeholders::_2));
-
-    Font::specialCharLookup.insert(std::make_pair(char(-1), "THICK_SP"));
-    Font::specialCharLookup.insert(std::make_pair(char(-2), "THICK_EX"));
-    Font::specialCharLookup.insert(std::make_pair(char(-3), "THICK_NM"));
   });
 
   this->UpdateConfigSettings(reader.GetConfigSettings());
@@ -257,10 +252,10 @@ bool Game::NextFrame()
   bool nextFrameKey = inputManager.Has(InputEvents::pressed_advance_frame);
   bool resumeKey = inputManager.Has(InputEvents::pressed_resume_frames);
 
-  if (nextFrameKey && isDebug && !frameByFrame) {
+  if (nextFrameKey && isDebug) {
     frameByFrame = true;
   }
-  else if (resumeKey && frameByFrame) {
+  else if (resumeKey) {
     frameByFrame = false;
   }
 
@@ -269,9 +264,6 @@ bool Game::NextFrame()
 
 void Game::HandleRecordingEvents()
 {
-  if (isRecordOutSaving)
-    return;
-
   if (!inputManager.Has(InputEvents::pressed_record_frames)) {
     recordPressed = false;
     return;
@@ -283,30 +275,12 @@ void Game::HandleRecordingEvents()
   recordPressed = true;
 
   if (!IsRecording()) {
-    Record(true);
+    StartRecording();
     window.SetSubtitle("[RECORDING]");
-    return;
-  }
-
-  recordOutThread = std::thread([this]() {
-    isRecordOutSaving = true;
-    Record(false);
-
-    Logger::Logf(LogLevel::info, "Saving recording to disk, please wait.");
-    window.SetSubtitle("[SAVING]");
-
-    for (auto& pair : recordedFrames) {
-      pair.second.saveToFile("recording/frame_" + std::to_string(pair.first) + ".png");
-    }
-
-    Logger::Logf(LogLevel::info, "Wrote %i frames to disk", (int)recordedFrames.size());
-    recordedFrames.clear();
+  } else {
+    StopRecording();
     window.SetSubtitle("");
-
-    isRecordOutSaving = false;
-  });
-
-  recordOutThread.detach();
+  }
 }
 
 void Game::UpdateMouse(double dt)
@@ -335,22 +309,21 @@ void Game::ProcessFrame()
     netManager.Update(delta);
 
     inputManager.Update(); // process inputs
+    UpdateMouse(delta);
+
+    window.Clear(); // clear screen
 
     if (NextFrame()) {
-      window.Clear(); // clear screen
-
       HandleRecordingEvents();
-      UpdateMouse(delta);
-
       this->update(delta);  // update game logic
-      this->draw();        // draw game
-      mouse.draw(*window.GetRenderWindow());
-      window.Display(); // display to screen
+    }
 
-      if (isRecording) {
-        sf::Image image = window.GetRenderWindow()->capture();
-        recordedFrames.push_back(std::pair(FrameNumber(), image));
-      }
+    this->draw();        // draw game
+    mouse.draw(*window.GetRenderWindow());
+    window.Display(); // display to screen
+
+    if (frameRecorder) {
+      frameRecorder->capture();
     }
 
     scope_elapsed = clock.getElapsedTime().asSeconds();
@@ -369,27 +342,31 @@ void Game::RunSingleThreaded()
     // Poll window events
     inputManager.EventPoll();
 
-    // unused images need to be free'd 
+    // unused images need to be free'd
     textureManager.HandleExpiredTextureCache();
+    audioManager.HandleExpiredAudioCache();
 
     double delta = 1.0 / static_cast<double>(frame_time_t::frames_per_second);
     this->elapsed += from_seconds(delta);
 
     // Poll net code
     netManager.Update(delta);
-
     inputManager.Update(); // process inputs
+    UpdateMouse(delta);
 
-    HandleRecordingEvents();
+    window.Clear(); // clear screen
 
     if (NextFrame()) {
-      window.Clear(); // clear screen
-
-      UpdateMouse(delta);
+      HandleRecordingEvents();
       this->update(delta);  // update game logic
-      this->draw();        // draw game
-      mouse.draw(*window.GetRenderWindow());
-      window.Display(); // display to screen
+    }
+
+    this->draw();        // draw game
+    mouse.draw(*window.GetRenderWindow());
+    window.Display(); // display to screen
+
+    if (frameRecorder) {
+      frameRecorder->capture();
     }
 
     quitting = getStackSize() == 0;
@@ -408,14 +385,15 @@ void Game::Run()
   if (singlethreaded) {
     RunSingleThreaded();
     return;
-  }  
+  }
 
   while (window.Running() && !quitting) {
     // Poll window events
     inputManager.EventPoll();
 
-    // unused images need to be free'd 
+    // unused images need to be free'd
     textureManager.HandleExpiredTextureCache();
+    audioManager.HandleExpiredAudioCache();
 
     quitting = getStackSize() == 0;
   }
@@ -483,7 +461,7 @@ void Game::UpdateConfigSettings(const struct ConfigSettings& new_settings)
     ActivityController::enableShaders(false);
   }
 
-  // If the file is good, use the Audio() and 
+  // If the file is good, use the Audio() and
   // controller settings from the config
   audioManager.EnableAudio(configSettings.IsAudioEnabled());
   audioManager.SetStreamVolume(((configSettings.GetMusicLevel()-1) / 3.0f) * 100.0f);
@@ -495,12 +473,8 @@ void Game::UpdateConfigSettings(const struct ConfigSettings& new_settings)
 void Game::SeedRand(unsigned int seed)
 {
   srand(seed);
+  SeedSyncedRand(seed);
   randSeed = seed;
-
-#ifdef BN_MOD_SUPPORT
-  scriptManager.SeedRand(seed);
-#endif
-
 }
 
 const unsigned int Game::GetRandSeed() const
@@ -515,12 +489,17 @@ bool Game::IsSingleThreaded() const
 
 bool Game::IsRecording() const
 {
-  return isRecording;
+  return frameRecorder != nullptr;
 }
 
-void Game::Record(bool enabled)
+void Game::StartRecording()
 {
-  isRecording = enabled;
+  frameRecorder = std::make_unique<FrameRecorder>(*window.GetRenderWindow());
+}
+
+void Game::StopRecording()
+{
+  frameRecorder = nullptr;
 }
 
 void Game::SetSubtitle(const std::string& subtitle)
@@ -528,44 +507,44 @@ void Game::SetSubtitle(const std::string& subtitle)
   window.SetSubtitle(subtitle);
 }
 
-const std::string Game::AppDataPath()
+const std::filesystem::path Game::AppDataPath()
 {
-  return sago::getDataHome() + "/" + window.GetTitle();
+  return std::filesystem::u8path(sago::getDataHome()) / window.GetTitle();
 }
 
-const std::string Game::CacheDataPath()
+const std::filesystem::path Game::CacheDataPath()
 {
-  return sago::getCacheDir() + "/" + window.GetTitle();
+  return std::filesystem::u8path(sago::getCacheDir()) / window.GetTitle();
 }
 
-const std::string Game::DesktopPath()
+const std::filesystem::path Game::DesktopPath()
 {
-  return sago::getDesktopFolder();
+  return std::filesystem::u8path(sago::getDesktopFolder());
 }
 
-const std::string Game::DownloadsPath()
+const std::filesystem::path Game::DownloadsPath()
 {
-  return sago::getDownloadFolder();
+  return std::filesystem::u8path(sago::getDownloadFolder());
 }
 
-const std::string Game::DocumentsPath()
+const std::filesystem::path Game::DocumentsPath()
 {
-  return sago::getDocumentsFolder();
+  return std::filesystem::u8path(sago::getDocumentsFolder());
 }
 
-const std::string Game::VideosPath()
+const std::filesystem::path Game::VideosPath()
 {
-  return sago::getVideoFolder();
+  return std::filesystem::u8path(sago::getVideoFolder());
 }
 
-const std::string Game::PicturesPath()
+const std::filesystem::path Game::PicturesPath()
 {
-  return sago::getPicturesFolder();
+  return std::filesystem::u8path(sago::getPicturesFolder());
 }
 
-const std::string Game::SaveGamesPath()
+const std::filesystem::path Game::SaveGamesPath()
 {
-  return sago::getSaveGamesFolder1();
+  return std::filesystem::u8path(sago::getSaveGamesFolder1());
 }
 
 CardPackagePartitioner& Game::CardPackagePartitioner()

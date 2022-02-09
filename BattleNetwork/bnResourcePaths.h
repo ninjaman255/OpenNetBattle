@@ -17,6 +17,7 @@ namespace TexturePaths {
   path MOB_BOSS_SHINE = "resources/scenes/battle/boss_shine.png";
 
   // Battle Misc
+  path CUST_GAUGE = "resources/ui/custom.png";
   path MISC_COUNTER_REVEAL = "resources/scenes/battle/counter_reveal.png";
   path MISC_SMALL_SHADOW = "resources/scenes/battle/small_shadow.png";
   path MISC_BIG_SHADOW = "resources/scenes/battle/big_shadow.png";
@@ -27,8 +28,11 @@ namespace TexturePaths {
   path SPELL_CHARGED_BULLET_HIT = "resources/scenes/battle/spells/spell_charged_bullet_hit.png";
   path SPELL_BUBBLE_TRAP = "resources/scenes/battle/spells/bubble_trap.png";
   path SPELL_POOF = "resources/scenes/battle/spells/poof.png";
+  path ICE_FX = "resources/scenes/battle/spells/ice_fx.png";
+  path BLIND_FX = "resources/scenes/battle/blind.png";
+  path CONFUSED_FX = "resources/scenes/battle/spells/confused.png";
 
-  //Card Select 
+  //Card Select
   path CHIP_SELECT_MENU = "resources/ui/card_select.png";
   path CHIP_SELECT_MEGA_OVERLAY = "resources/ui/card_select_mega_overlay.png";
   path CHIP_SELECT_GIGA_OVERLAY = "resources/ui/card_select_giga_overlay.png";
@@ -132,11 +136,22 @@ namespace TexturePaths {
   path SCREEN_BAR = "resources/ui/screen_bar.png";
 
   // FONT
-  path FONT = "resources/fonts/fonts_compressed.png";
+  path FONT = "resources/fonts/fonts.png";
 
   // CONFIG UI
   path AUDIO_ICO = "resources/scenes/config/audio.png";
   path END_BTN = "resources/scenes/config/end_btn.png";
 };
 
+namespace AnimationPaths {
+  path ICE_FX = "resources/scenes/battle/spells/ice_fx.animation";
+  path BLIND_FX = "resources/scenes/battle/blind.animation";
+  path CONFUSED_FX = "resources/scenes/battle/spells/confused.animation";
+  path MISC_COUNTER_REVEAL = "resources/scenes/battle/counter_reveal.animation";
+}
+
+namespace SoundPaths {
+  path ICE_FX = "resources/sfx/freeze.ogg";
+  path CONFUSED_FX = "resources/sfx/confused.ogg";
+}
 #undef path

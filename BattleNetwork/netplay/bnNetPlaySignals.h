@@ -1,6 +1,6 @@
 #pragma once
 
-enum class NetPlaySignals : unsigned int {
+enum class NetPlaySignals : uint32_t {
   none = 0,
   ///////////////////////
   //       ACKs        //
@@ -17,6 +17,7 @@ enum class NetPlaySignals : unsigned int {
   //  PVP Battle Cmds  // 
   ///////////////////////
   handshake, // send round information along with hand and form selections
+  sync,
   frame_data,
 
   ///////////////////////

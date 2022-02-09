@@ -7,6 +7,11 @@
 #include "Android/bnTouchArea.h"
 #include "../../bnBlockPackageManager.h"
 #include "../../bnPlayerCustScene.h"
+
+#include <Poco/TextIterator.h>
+#include <Poco/UTF8Encoding.h>
+#include <Poco/UnicodeConverter.h>
+
 constexpr float PIXEL_MAX = 50.0f;
 constexpr float PIXEL_SPEED = 180.0f;
 
@@ -61,7 +66,7 @@ SelectMobScene::SelectMobScene(swoosh::ActivityController& controller, SelectMob
   bg.setTexture(Textures().LoadFromFile(TexturePaths::BATTLE_SELECT_BG));
   bg.setScale(2.f, 2.f);
 
-  gotoNextScene = true; 
+  gotoNextScene = true;
   doOnce = false; // wait until the scene starts or resumes
   showMob = false;
 
@@ -103,7 +108,7 @@ void SelectMobScene::onUpdate(double elapsed) {
       selectInputCooldown -= elapsed;
 
       if (selectInputCooldown <= 0) {
-        // Go to previous mob 
+        // Go to previous mob
         selectInputCooldown = maxSelectInputCooldown;
         mobSelectionId = getController().MobPackagePartitioner().GetPartition(Game::LocalPartition).GetPackageBefore(mobSelectionId);
 
@@ -115,7 +120,7 @@ void SelectMobScene::onUpdate(double elapsed) {
       selectInputCooldown -= elapsed;
 
       if (selectInputCooldown <= 0) {
-        // Go to next mob 
+        // Go to next mob
         selectInputCooldown = maxSelectInputCooldown;
         mobSelectionId = getController().MobPackagePartitioner().GetPartition(Game::LocalPartition).GetPackageAfter(mobSelectionId);
 
@@ -250,21 +255,29 @@ void SelectMobScene::onUpdate(double elapsed) {
     numberCooldown -= (float)elapsed;
     std::string newstr;
 
-    for (int i = 0; i < mobLabel.GetString().length(); i++) {
+    Poco::UTF8Encoding utf8Encoding;
+    Poco::TextIterator it(mobLabel.GetString(), utf8Encoding);
+    Poco::TextIterator end(mobLabel.GetString());
+    size_t i = 0;
+    size_t length = Poco::UnicodeConverter::UTFStrlen(mobLabel.GetString().c_str());
+    for (; it != end; ++it) {
       double progress = (maxNumberCooldown - numberCooldown) / maxNumberCooldown;
-      double index = progress * mobLabel.GetString().length();
+      double index = progress * length;
 
       if (i < (int)index) {
-        newstr += mobLabel.GetString()[i];
+        std::string utf8string;
+        Poco::UnicodeConverter::convert(Poco::UTF32String(1, *it), utf8string);
+        newstr += utf8string;
       }
       else {
-        if (mobLabel.GetString()[i] != ' ') {
+        if (*it != U' ') {
           newstr += (char)(((rand() % (90 - 65)) + 65) + 1);
         }
         else {
           newstr += ' ';
         }
       }
+      ++i;
     }
 
     int randAttack = 0;
@@ -280,7 +293,7 @@ void SelectMobScene::onUpdate(double elapsed) {
 
       count--;
     }
-    
+
     count = (int)mobinfo.GetAttackString().size() - 1;
 
     while (count >= 0) {
@@ -291,7 +304,7 @@ void SelectMobScene::onUpdate(double elapsed) {
 
       count--;
     }
-    
+
     count = (int)mobinfo.GetSpeedString().size() - 1;
 
     while (count >= 0) {
@@ -309,9 +322,9 @@ void SelectMobScene::onUpdate(double elapsed) {
     mobLabel.SetString(sf::String(newstr));
   }
 
-  
+
   /**
-   * End scramble effect 
+   * End scramble effect
    */
 
   factor -= (float)elapsed * PIXEL_SPEED;
@@ -323,9 +336,9 @@ void SelectMobScene::onUpdate(double elapsed) {
   // Progress for data scramble effect
   float progress = (maxNumberCooldown - numberCooldown) / maxNumberCooldown;
 
-  if (progress > 1.f) { 
-    progress = 1.f; 
-  
+  if (progress > 1.f) {
+    progress = 1.f;
+
   if(!gotoNextScene) {
       textbox.Play();
     }
@@ -360,15 +373,15 @@ void SelectMobScene::onUpdate(double elapsed) {
       // Play the pre battle rumble sound
       Audio().Play(AudioType::PRE_BATTLE, AudioPriority::high);
 
-      // Stop music and go to battle screen 
+      // Stop music and go to battle screen
       Audio().StopStream();
 
 
       // Get the navi we selected
       auto& meta = getController().PlayerPackagePartitioner().GetPartition(Game::LocalPartition).FindPackageByID(selectedNaviId);
-      const std::string& image = meta.GetMugshotTexturePath();
-      const std::string& mugshotAnim = meta.GetMugshotAnimationPath();
-      const std::string& emotionsTexture = meta.GetEmotionsTexturePath();
+      const std::filesystem::path& image = meta.GetMugshotTexturePath();
+      const std::filesystem::path& mugshotAnim = meta.GetMugshotAnimationPath();
+      const std::filesystem::path& emotionsTexture = meta.GetEmotionsTexturePath();
       auto mugshot = Textures().LoadFromFile(image);
       auto emotions = Textures().LoadFromFile(emotionsTexture);
       auto player = std::shared_ptr<Player>(meta.GetData());
@@ -410,7 +423,7 @@ void SelectMobScene::onUpdate(double elapsed) {
         getController().push<effect::to<FreedomMissionMobScene>>(std::move(props));
       }
       else {
-        MobBattleProperties props{ 
+        MobBattleProperties props{
           { player, programAdvance, std::move(newFolder), mob->GetField(), mob->GetBackground() },
           MobBattleProperties::RewardBehavior::take,
           { mob },
@@ -508,16 +521,16 @@ void SelectMobScene::onDraw(sf::RenderTexture & surface) {
     // If there are no more items to the left, fade the cursor
   //  cursor.setColor(sf::Color(255, 255, 255, 100));
   //}
-     
+
   // Add sine offset to create a bob effect
   auto offset = std::sin(elapsed*10.0) * 5;
-  
+
   // Put the left cursor on the left of the mob
   cursor.setPosition(23.0f + (float)offset, 130.0f);
-  
+
   // Flip the x axis
   cursor.setScale(-2.f, 2.f);
-  
+
   // Draw left cursor
   surface.draw(cursor);
 
@@ -531,13 +544,13 @@ void SelectMobScene::onDraw(sf::RenderTexture & surface) {
 
   // Add sine offset to create a bob effect
   offset = -std::sin(elapsed*10.0) * 5;
-  
+
   // Put the right cursor on the right of the mob
   cursor.setPosition(200.0f + (float)offset, 130.0f);
-  
+
   // Flip the x axis
   cursor.setScale(2.f, 2.f);
-  
+
   // Draw the right cursor
   surface.draw(cursor);
 }

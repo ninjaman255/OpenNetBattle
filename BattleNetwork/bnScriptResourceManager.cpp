@@ -21,6 +21,7 @@
 #include "bnField.h"
 #include "bnParticlePoof.h"
 #include "bnPlayerCustScene.h"
+#include "bnRandom.h"
 
 #include "bindings/bnLuaLibrary.h"
 #include "bindings/bnScriptedMob.h"
@@ -93,6 +94,11 @@ void ScriptResourceManager::SetSystemFunctions(ScriptPackage& scriptPackage)
 
   state.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table);
 
+  // vulnerability patching, why is this included with lib::base :(
+  state["load"] = nullptr;
+  state["loadfile"] = nullptr;
+  state["dofile"] = nullptr;
+
   state["math"]["randomseed"] = []{
     Logger::Log(LogLevel::warning, "math.random uses the engine's random number generator and does not need to be seeded");
   };
@@ -100,13 +106,13 @@ void ScriptResourceManager::SetSystemFunctions(ScriptPackage& scriptPackage)
   state["math"]["random"] = sol::overload(
     [] (int n, int m) -> int { // [n, m]
       int range = m - n;
-      return rand() % (range + 1) + n;
+      return SyncedRand() % (range + 1) + n;
     },
     [] (int n) -> int { // [1, n]
-      return rand() % n + 1;
+      return SyncedRand() % n + 1;
     },
     [] () -> float { // [0, 1)
-      return (float)rand() / ((float)(RAND_MAX) + 1);
+      return (float)SyncedRand() / ((float)(SyncedRandMax()) + 1);
     }
   );
 
@@ -115,14 +121,14 @@ void ScriptResourceManager::SetSystemFunctions(ScriptPackage& scriptPackage)
   // Has to capture a pointer to sol::state, the copy constructor was deleted, cannot capture a copy to reference.
   state.set_function("include",
     [this, &state, &namespaceId, &scriptPackage](const std::string& fileName) -> sol::object {
-      std::string scriptPath;
+      std::filesystem::path scriptPath;
 
       // Prefer using the shared libraries if possible.
       // i.e. ones that were present in "mods/libs/"
       // make sure it was required by checking dependencies as well
-      if(std::find(scriptPackage.dependencies.begin(), scriptPackage.dependencies.end(), scriptPath) != scriptPackage.dependencies.end())
+      if(std::find(scriptPackage.dependencies.begin(), scriptPackage.dependencies.end(), fileName) != scriptPackage.dependencies.end())
       {
-        Logger::Logf(LogLevel::debug, "Including shared library: %s", fileName.c_str());
+        Logger::Log(LogLevel::debug, "Including shared library: " + fileName);
 
         auto* libraryPackage = FetchScriptPackage(namespaceId, fileName, ScriptPackageType::library);
 
@@ -130,20 +136,22 @@ void ScriptResourceManager::SetSystemFunctions(ScriptPackage& scriptPackage)
           throw std::runtime_error("Library package \"" + fileName + "\" is either not installed or has not had time to initialize");
         }
 
-        scriptPath = libraryPackage->path;
+        scriptPath = libraryPackage->path / "entry.lua";
       }
       else
       {
-        Logger::Logf(LogLevel::debug, "Including local library: %s", fileName.c_str());
+        Logger::Log(LogLevel::debug, "Including local library: " + fileName);
 
-        auto parentFolder = GetCurrentFolder(state).unwrap();
-        scriptPath = parentFolder + "/" + fileName;
+        std::filesystem::path parentFolder = GetCurrentFolder(state).unwrap();
+        std::filesystem::path filePath = std::filesystem::u8path(fileName);
+        scriptPath = parentFolder / filePath;
       }
 
       sol::environment env(state, sol::create, state.globals());
-      env["_folderpath"] = std::filesystem::path(scriptPath).parent_path().string() + "/";
+      env["_folderpath"] = scriptPath.parent_path().generic_u8string() + "/";
 
-      sol::protected_function_result result = state.do_file(scriptPath, env);
+      std::string code = FileUtil::Read(scriptPath);
+      sol::protected_function_result result = state.do_string(code, env, "@" + scriptPath.u8string());
 
       if (!result.valid()) {
         sol::error error = result;
@@ -157,12 +165,12 @@ void ScriptResourceManager::SetSystemFunctions(ScriptPackage& scriptPackage)
 
 void ScriptResourceManager::SetModPathVariable( sol::state& state, const std::filesystem::path& modDirectory )
 {
-  state["_modpath"] = modDirectory.generic_string() + "/";
-  state["_folderpath"] = modDirectory.generic_string() + "/";
+  state["_modpath"] = modDirectory.generic_u8string() + "/";
+  state["_folderpath"] = modDirectory.generic_u8string() + "/";
 }
 
 // Free Function provided to a number of Lua types that will print an error message when attempting to access a key that does not exist.
-// Will print the file and line the error occured in, as well as the invalid key and type. 
+// Will print the file and line the error occured in, as well as the invalid key and type.
 sol::object ScriptResourceManager::PrintInvalidAccessMessage( sol::table table, const std::string typeName, const std::string key )
 {
   Logger::Log(LogLevel::critical, "[Script Error] in " + GetCurrentLine( table.lua_state() ) );
@@ -171,7 +179,7 @@ sol::object ScriptResourceManager::PrintInvalidAccessMessage( sol::table table, 
   return sol::lua_nil;
 }
 // Free Function provided to a number of Lua types that will print an error message when attempting to assign to a key that exists in a system type.
-// Will print the file and line the error occured in, as well as the invalid key and type. 
+// Will print the file and line the error occured in, as well as the invalid key and type.
 sol::object ScriptResourceManager::PrintInvalidAssignMessage( sol::table table, const std::string typeName, const std::string key )
 {
   Logger::Log(LogLevel::critical, "[Script Error] in " + GetCurrentLine( table.lua_state() ) );
@@ -180,7 +188,7 @@ sol::object ScriptResourceManager::PrintInvalidAssignMessage( sol::table table, 
   return sol::lua_nil;
 }
 
-stx::result_t<std::string> ScriptResourceManager::GetCurrentFile(lua_State* L)
+stx::result_t<std::filesystem::path> ScriptResourceManager::GetCurrentFile(lua_State* L)
 {
   lua_Debug ar;
   lua_getstack(L, 1, &ar);
@@ -189,13 +197,13 @@ stx::result_t<std::string> ScriptResourceManager::GetCurrentFile(lua_State* L)
   auto path = std::string(ar.source);
 
   if (path.empty() || path[0] != '@') {
-    return stx::error<std::string>("Failed to resolve current file");
+    return stx::error<std::filesystem::path>("Failed to resolve current file");
   }
 
-  return stx::ok(path.substr(1));
+  return stx::ok(std::filesystem::u8path(path.substr(1)));
 }
 
-stx::result_t<std::string> ScriptResourceManager::GetCurrentFolder(lua_State* L)
+stx::result_t<std::filesystem::path> ScriptResourceManager::GetCurrentFolder(lua_State* L)
 {
   auto res = GetCurrentFile(L);
 
@@ -203,9 +211,7 @@ stx::result_t<std::string> ScriptResourceManager::GetCurrentFolder(lua_State* L)
     return res;
   }
 
-  auto path = std::filesystem::path(res.value()).parent_path();
-
-  return stx::ok(path.string());
+  return stx::ok(res.value().parent_path());
 }
 
 // Returns the current executing line in the Lua script.
@@ -215,7 +221,7 @@ std::string ScriptResourceManager::GetCurrentLine( lua_State* L )
   lua_Debug ar;
   lua_getstack(L, 1, &ar);
   lua_getinfo(L, "Sl", &ar);
-  
+
   return std::string(ar.source) + ":" + std::to_string(ar.currentline);
 }
 
@@ -227,7 +233,10 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
   sol::table overworld_namespace = state.create_table("Overworld");
   sol::table engine_namespace = state.create_table("Engine");
 
-  engine_namespace.set_function("get_rand_seed", [this]() -> unsigned int { return randSeed; });
+  engine_namespace.set_function("get_rand_seed", [this]() -> unsigned int {
+    Logger::Log(LogLevel::warning, "Engine.get_rand_seed() is deprecated");
+    return 0;
+  });
 
   DefineFieldUserType(battle_namespace);
   DefineTileUserType(state);
@@ -271,10 +280,10 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
 
   // make meta object info metatable
   const auto& playermeta_table = battle_namespace.new_usertype<PlayerMeta>("PlayerMeta",
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "PlayerMeta", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "PlayerMeta", key );
     },
     "set_special_description", &PlayerMeta::SetSpecialDescription,
@@ -283,11 +292,21 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
     "set_speed", &PlayerMeta::SetSpeed,
     "set_health", &PlayerMeta::SetHP,
     "set_uses_sword", &PlayerMeta::SetIsSword,
-    "set_overworld_animation_path", &PlayerMeta::SetOverworldAnimationPath,
-    "set_overworld_texture_path", &PlayerMeta::SetOverworldTexturePath,
-    "set_mugshot_animation_path", &PlayerMeta::SetMugshotAnimationPath,
-    "set_mugshot_texture_path", &PlayerMeta::SetMugshotTexturePath,
-    "set_emotions_texture_path", &PlayerMeta::SetEmotionsTexturePath,
+    "set_overworld_animation_path", [] (PlayerMeta& meta, const std::string& path) {
+      meta.SetOverworldAnimationPath(std::filesystem::u8path(path));
+    },
+    "set_overworld_texture_path", [] (PlayerMeta& meta, const std::string& path) {
+      meta.SetOverworldTexturePath(std::filesystem::u8path(path));
+    },
+    "set_mugshot_animation_path", [] (PlayerMeta& meta, const std::string& path) {
+      meta.SetMugshotAnimationPath(std::filesystem::u8path(path));
+    },
+    "set_mugshot_texture_path", [] (PlayerMeta& meta, const std::string& path) {
+      meta.SetMugshotTexturePath(std::filesystem::u8path(path));
+    },
+    "set_emotions_texture_path", [] (PlayerMeta& meta, const std::string& path) {
+      meta.SetEmotionsTexturePath(std::filesystem::u8path(path));
+    },
     "set_preview_texture", &PlayerMeta::SetPreviewTexture,
     "set_icon_texture", &PlayerMeta::SetIconTexture,
     "declare_package_id", [SetPackageId] (PlayerMeta& meta, const std::string& packageId) {
@@ -297,15 +316,17 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
   );
 
   const auto& mobmeta_table = battle_namespace.new_usertype<MobMeta>("MobMeta",
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "MobMeta", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "MobMeta", key );
     },
     "set_description", &MobMeta::SetDescription,
     "set_name", &MobMeta::SetName,
-    "set_preview_texture_path", &MobMeta::SetPlaceholderTexturePath,
+    "set_preview_texture_path", [] (MobMeta& meta, const std::string& path) {
+      meta.SetPlaceholderTexturePath(std::filesystem::u8path(path));
+    },
     "set_speed", &MobMeta::SetSpeed,
     "set_attack", &MobMeta::SetAttack,
     "set_health", &MobMeta::SetHP,
@@ -314,12 +335,12 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
       meta.SetPackageID(packageId);
     }
   );
-  
+
   const auto& lualibrarymeta_table = battle_namespace.new_usertype<LuaLibraryMeta>("LuaLibraryMeta",
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "LuaLibraryMeta", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "LuaLibraryMeta", key );
     },
     "declare_package_id", [SetPackageId] (LuaLibraryMeta& meta, const std::string& packageId) {
@@ -354,37 +375,41 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
   );
 
   const auto& scriptedmob_table = battle_namespace.new_usertype<ScriptedMob>("Mob",
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "Mob", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "Mob", key );
     },
     "create_spawner", [&namespaceId](ScriptedMob& self, const std::string& fqn, Character::Rank rank) {
       return self.CreateSpawner(namespaceId, fqn, rank);
     },
-    "set_background", &ScriptedMob::SetBackground,
-    "stream_music", &ScriptedMob::StreamMusic,
+    "set_background", [](ScriptedMob& mob, const std::string& texturePath, const std::string& animPath, float velx, float vely) {
+      return mob.SetBackground(texturePath, animPath, velx, vely);
+    },
+    "stream_music", [](ScriptedMob& mob, const std::string& path, std::optional<long long> startMs, std::optional<long long> endMs) {
+      mob.StreamMusic(path, startMs.value_or(-1), endMs.value_or(-1));
+    },
     "get_field", [](ScriptedMob& o) { return WeakWrapper(o.GetField()); },
     "enable_freedom_mission", &ScriptedMob::EnableFreedomMission,
     "spawn_player", &ScriptedMob::SpawnPlayer
   );
 
   const auto& scriptedspawner_table = battle_namespace.new_usertype<ScriptedMob::ScriptedSpawner>("Spawner",
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "Spawner", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "Spawner", key );
     },
     "spawn_at", &ScriptedMob::ScriptedSpawner::SpawnAt
   );
 
   battle_namespace.new_usertype<Mob::Mutator>("SpawnMutator",
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "SpawnMutator", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "SpawnMutator", key );
     },
     "mutate", [](Mob::Mutator& mutator, sol::object callbackObject) {
@@ -406,21 +431,21 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
   engine_namespace.set_function("load_texture",
     [](const std::string& path) {
       static ResourceHandle handle;
-      return handle.Textures().LoadFromFile(path);
+      return handle.Textures().LoadFromFile(std::filesystem::u8path(path));
     }
   );
 
   engine_namespace.set_function("load_shader",
     [](const std::string& path) {
       static ResourceHandle handle;
-      return handle.Shaders().LoadShaderFromFile(path);
+      return handle.Shaders().LoadShaderFromFile(std::filesystem::u8path(path));
     }
   );
 
   engine_namespace.set_function("load_audio",
     [](const std::string& path) {
       static ResourceHandle handle;
-      return handle.Audio().LoadFromFile(path);
+      return handle.Audio().LoadFromFile(std::filesystem::u8path(path));
     }
   );
 
@@ -433,6 +458,14 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
     [](AudioType type, AudioPriority priority) {
       static ResourceHandle handle;
       return handle.Audio().Play(type, priority);
+    })
+  );
+
+  engine_namespace.set_function("stream_music",
+    sol::factories(
+      [](const std::string& path, std::optional<bool> loop, std::optional<long long> startMs, std::optional<long long> endMs) {
+      static ResourceHandle handle;
+      return handle.Audio().Stream(path, loop.value_or(true), startMs.value_or(-1), endMs.value_or(-1));
     })
   );
 
@@ -498,6 +531,7 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
     "flip_y", [](Direction direction) { return FlipVertical(direction); },
     "reverse", [](Direction direction) { return Reverse(direction); },
     "join", [](Direction a, Direction b) { return Join(a, b); },
+    "unit_vector", [](Direction direction) { return UnitVector(direction); },
     "None", Direction::none,
     "Up", Direction::up,
     "Down", Direction::down,
@@ -555,10 +589,15 @@ void ScriptResourceManager::ConfigureEnvironment(ScriptPackage& scriptPackage) {
     "EX", Character::Rank::EX,
     "Rare1", Character::Rank::Rare1,
     "Rare2", Character::Rank::Rare2,
-    "NM", Character::Rank::NM
+    "NM", Character::Rank::NM,
+    "RV", Character::Rank::RV,
+    "DS", Character::Rank::DS,
+    "Alpha", Character::Rank::Alpha,
+    "Beta", Character::Rank::Beta,
+    "Omega", Character::Rank::Omega
   );
 
-  const auto& audio_type_record = state.new_enum("AudioType", 
+  const auto& audio_type_record = state.new_enum("AudioType",
     "CounterBonus", AudioType::COUNTER_BONUS,
     "DirTile", AudioType::DIR_TILE,
     "Fanfare", AudioType::FANFARE,
@@ -704,7 +743,7 @@ stx::result_t<sol::state*> ScriptResourceManager::LoadScript(const std::string& 
   scriptPackage.state = lua;
   scriptPackage.type = type;
   scriptPackage.address.namespaceId = namespaceId;
-  scriptPackage.path = modDirectory.generic_string();
+  scriptPackage.path = modDirectory;
 
   // Configure the scripts to run safely
   SetModPathVariable(*lua, modDirectory);
@@ -712,7 +751,8 @@ stx::result_t<sol::state*> ScriptResourceManager::LoadScript(const std::string& 
   ConfigureEnvironment(scriptPackage);
 
   lua->set_exception_handler(&::exception_handler);
-  auto loadResult = lua->safe_script_file(entryPath.generic_string(), sol::script_pass_on_error);
+  std::string code = FileUtil::Read(entryPath);
+  auto loadResult = lua->safe_script(code, sol::script_pass_on_error, "@" + entryPath.u8string());
 
   if (!loadResult.valid()) {
     sol::error loadError = loadResult;
@@ -793,7 +833,7 @@ static std::string PackageTypeToString(ScriptPackageType type) {
   }
 }
 
-ScriptPackage* ScriptResourceManager::DefinePackage(ScriptPackageType type, const std::string& namespaceId, const std::string& fqn, const std::string& path)
+ScriptPackage* ScriptResourceManager::DefinePackage(ScriptPackageType type, const std::string& namespaceId, const std::string& fqn, const std::filesystem::path& path)
 {
   PackageAddress addr = { namespaceId, fqn };
   auto iter = address2package.find(addr);
@@ -817,7 +857,7 @@ ScriptPackage* ScriptResourceManager::DefinePackage(ScriptPackageType type, cons
   return scriptPackage;
 }
 
-void ScriptResourceManager::DefineSubpackage(ScriptPackage& parentPackage, ScriptPackageType type, const std::string& fqn, const std::string& path)
+void ScriptResourceManager::DefineSubpackage(ScriptPackage& parentPackage, ScriptPackageType type, const std::string& fqn, const std::filesystem::path& path)
 {
   ScriptPackage* scriptPackage = DefinePackage(type, parentPackage.address.namespaceId, fqn, path);
   parentPackage.subpackages.push_back(scriptPackage->address.packageId);
@@ -839,11 +879,6 @@ ScriptPackage* ScriptResourceManager::FetchScriptPackage(const std::string& name
   }
 
   return package;
-}
-
-void ScriptResourceManager::SeedRand(unsigned int seed)
-{
-  randSeed = seed;
 }
 
 void ScriptResourceManager::SetCardPackagePartitioner(CardPackagePartitioner& partition)

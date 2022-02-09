@@ -47,7 +47,7 @@ Character::~Character() {
 }
 
 void Character::Cleanup() {
-  for (auto& action : asyncActions) {
+  for (std::shared_ptr<CardAction>& action : asyncActions) {
     action->EndAction();
   }
 
@@ -98,12 +98,12 @@ void Character::Update(double _elapsed) {
       cardActionStartDelay -= from_seconds(_elapsed);
 
       // execute when delay is over
-      if (this->cardActionStartDelay <= frames(0)) {
+      if (cardActionStartDelay <= frames(0)) {
         for(std::shared_ptr<AnimationComponent>& anim : this->GetComponents<AnimationComponent>()) {
           anim->CancelCallbacks();
         }
         MakeActionable();
-        auto characterPtr = shared_from_base<Character>();
+        std::shared_ptr<Character> characterPtr = shared_from_base<Character>();
         currCardAction->Execute(characterPtr);
       }
     }
@@ -128,8 +128,8 @@ void Character::Update(double _elapsed) {
 
 bool Character::CanMoveTo(Battle::Tile * next)
 {
-  if (auto action = this->CurrentCardAction()) {
-    auto res = action->CanMoveTo(next);
+  if (std::shared_ptr<CardAction> action = this->CurrentCardAction()) {
+    std::optional<bool> res = action->CanMoveTo(next);
 
     if (res) {
       return *res;
@@ -142,7 +142,7 @@ bool Character::CanMoveTo(Battle::Tile * next)
     return c && c != this && !c->CanShareTileSpace();
   };
 
-  bool result = (Entity::CanMoveTo(next) && next->FindEntities(occupied).size() == 0);
+  bool result = (Entity::CanMoveTo(next) && next->FindHittableEntities(occupied).size() == 0);
   result = result && !next->IsEdgeTile();
 
   return result;
@@ -191,6 +191,7 @@ void Character::HandleCardEvent(const CardEvent& event, const ActionQueue::Execu
       actionQueue.Pop();
     }
     else {
+      cardActionStartDelay = frames(5);
       currCardAction = event.action;
     }
   }
@@ -207,12 +208,12 @@ void Character::HandlePeekEvent(const PeekCardEvent& event, const ActionQueue::E
 {
   SelectedCardsUI* publisher = event.publisher;
   if (publisher) {
-    auto characterPtr = shared_from_base<Character>();
+    std::shared_ptr<Character> characterPtr = shared_from_base<Character>();
 
     // If we have a card via Peeking, then Play it
     if (publisher->HandlePlayEvent(characterPtr)) {
       // prepare for this frame's action animation (we must be actionable)
-      this->MakeActionable();
+      MakeActionable();
     }
   }
 

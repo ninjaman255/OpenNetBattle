@@ -30,7 +30,7 @@ FreedomMissionMobScene::FreedomMissionMobScene(ActivityController& controller, F
   // First, we create all of our scene states
   auto intro       = AddState<MobIntroBattleState>(mob);
   auto cardSelect  = AddState<CardSelectBattleState>();
-  auto combat      = AddState<CombatBattleState>(mob, battleDuration);
+  auto combat      = AddState<CombatBattleState>(battleDuration);
   auto combo       = AddState<CardComboBattleState>(this->GetSelectedCardsUI(), props.base.programAdvance);
   auto forms       = AddState<CharacterTransformBattleState>();
   auto battlestart = AddState<FreedomMissionStartState>(props.maxTurns);
@@ -85,7 +85,7 @@ FreedomMissionMobScene::FreedomMissionMobScene(ActivityController& controller, F
 
   // combat has multiple state interruptions based on events
   // so we can chain them together
-  combat.ChangeOnEvent(battleover, &CombatBattleState::RedTeamWon)
+  combat.ChangeOnEvent(battleover, HookPlayerWon())
     .ChangeOnEvent(battleover, &CombatBattleState::PlayerDeleted)
     .ChangeOnEvent(battleover, HookTurnLimitReached())
     .ChangeOnEvent(cardSelect, HookTurnTimeout())
@@ -126,8 +126,8 @@ void FreedomMissionMobScene::Init()
     Logger::Log(LogLevel::warning, std::string("Current mob was empty when battle started. Mob Type: ") + typeid(mob).name());
   }
   else {
-    LoadBlueTeamMob(mob);
     playerCanFlip = mob.PlayerCanFlip();
+    LoadBlueTeamMob(mob);
   }
 
   if (mob.HasPlayerSpawnPoint(1)) {
@@ -164,12 +164,12 @@ void FreedomMissionMobScene::OnHit(Entity& victim, const Hit::Properties& props)
       GetSelectedCardsUI().SetMultiplier(2);
     }
 
-    if (player->IsSuperEffective(props.element)) {
+    if (player->IsSuperEffective(props.element) || player->IsSuperEffective(props.secondaryElement)) {
       playerDecross = true;
     }
   }
 
-  if (victim.IsSuperEffective(props.element) && props.damage > 0) {
+  if (props.damage > 0 && (victim.IsSuperEffective(props.element) || victim.IsSuperEffective(props.secondaryElement))) {
     std::shared_ptr<ElementalDamage> seSymbol = std::make_shared<ElementalDamage>();
     seSymbol->SetLayer(-100);
     seSymbol->SetHeight(victim.GetHeight()+(victim.getLocalBounds().height*0.5f)); // place it at sprite height
@@ -179,12 +179,14 @@ void FreedomMissionMobScene::OnHit(Entity& victim, const Hit::Properties& props)
 
 void FreedomMissionMobScene::onUpdate(double elapsed)
 {
-  ProcessLocalPlayerInputQueue();
+  if (GetCurrentState() == combatPtr) {
+    ProcessLocalPlayerInputQueue();
 
-  if (playerCanFlip && GetCurrentState() == combatPtr) {
-    std::shared_ptr<Player> localPlayer = GetLocalPlayer();
-    if (localPlayer->IsActionable() && localPlayer->InputState().Has(InputEvents::pressed_option)) {
-      localPlayer->SetFacing(localPlayer->GetFacingAway());
+    if (playerCanFlip) {
+      std::shared_ptr<Player> localPlayer = GetLocalPlayer();
+      if (localPlayer->IsActionable() && localPlayer->InputState().Has(InputEvents::pressed_option)) {
+        localPlayer->SetFacing(localPlayer->GetFacingAway());
+      }
     }
   }
 
@@ -308,4 +310,22 @@ std::function<bool()> FreedomMissionMobScene::HookTurnTimeout()
   };
 
   return cardGaugeIsFull;
+}
+
+std::function<bool()> FreedomMissionMobScene::HookPlayerWon()
+{
+  auto lambda = [this] {
+    std::shared_ptr<Player> localPlayer = GetLocalPlayer();
+
+    if (localPlayer->GetTeam() == Team::red) {
+      return IsBlueTeamCleared();
+    }
+    else if (localPlayer->GetTeam() == Team::blue) {
+      return IsRedTeamCleared();
+    }
+
+    return IsBlueTeamCleared() && IsRedTeamCleared();
+  };
+
+  return lambda;
 }

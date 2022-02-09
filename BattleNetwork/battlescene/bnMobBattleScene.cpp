@@ -32,7 +32,7 @@ MobBattleScene::MobBattleScene(ActivityController& controller, MobBattleProperti
   // First, we create all of our scene states
   auto intro       = AddState<MobIntroBattleState>(current);
   auto cardSelect  = AddState<CardSelectBattleState>();
-  auto combat      = AddState<CombatBattleState>(current, battleDuration);
+  auto combat      = AddState<CombatBattleState>(battleDuration);
   auto combo       = AddState<CardComboBattleState>(this->GetSelectedCardsUI(), props.base.programAdvance);
   auto forms       = AddState<CharacterTransformBattleState>();
   auto battlestart = AddState<BattleStartBattleState>();
@@ -100,7 +100,7 @@ MobBattleScene::MobBattleScene(ActivityController& controller, MobBattleProperti
 
   // combat has multiple state interruptions based on events
   // so we can chain them together
-  combat.ChangeOnEvent(battleover, &CombatBattleState::RedTeamWon)
+  combat.ChangeOnEvent(battleover, HookPlayerWon())
     .ChangeOnEvent(forms, HookFormChangeStart(forms.Unwrap()))
     .ChangeOnEvent(fadeout, &CombatBattleState::PlayerDeleted)
     .ChangeOnEvent(cardSelect, &CombatBattleState::PlayerRequestCardSelect)
@@ -173,12 +173,15 @@ void MobBattleScene::OnHit(Entity& victim, const Hit::Properties& props)
       GetSelectedCardsUI().SetMultiplier(2);
     }
 
-    if (player->IsSuperEffective(props.element)) {
+    if (player->IsSuperEffective(props.element) || player->IsSuperEffective(props.secondaryElement)) {
       playerDecross = true;
     }
   }
 
-  if (victim.IsSuperEffective(props.element) && props.damage > 0) {
+  bool freezeBreak = victim.IsIceFrozen() && ((props.flags & Hit::breaking) == Hit::breaking);
+  bool superEffective = props.damage > 0 && (victim.IsSuperEffective(props.element) || victim.IsSuperEffective(props.secondaryElement));
+
+  if (freezeBreak || superEffective) {
     std::shared_ptr<ElementalDamage> seSymbol = std::make_shared<ElementalDamage>();
     seSymbol->SetLayer(-100);
     seSymbol->SetHeight(victim.GetHeight()+(victim.getLocalBounds().height*0.5f)); // place it at sprite height
@@ -188,7 +191,10 @@ void MobBattleScene::OnHit(Entity& victim, const Hit::Properties& props)
 
 void MobBattleScene::onUpdate(double elapsed)
 {
-  ProcessLocalPlayerInputQueue();
+  if (combatPtr->IsStateCombat(GetCurrentState())) {
+    ProcessLocalPlayerInputQueue();
+  }
+
   BattleSceneBase::onUpdate(elapsed);
 }
 
@@ -286,6 +292,24 @@ std::function<bool()> MobBattleScene::HookFormChangeStart(CharacterTransformBatt
     }
 
     return changeState;
+  };
+
+  return lambda;
+}
+
+std::function<bool()> MobBattleScene::HookPlayerWon()
+{
+  auto lambda = [this] {
+    std::shared_ptr<Player> localPlayer = GetLocalPlayer();
+
+    if (localPlayer->GetTeam() == Team::red) {
+      return IsBlueTeamCleared();
+    }
+    else if (localPlayer->GetTeam() == Team::blue) {
+      return IsRedTeamCleared();
+    }
+
+    return IsBlueTeamCleared() && IsRedTeamCleared();
   };
 
   return lambda;

@@ -1,16 +1,16 @@
 /*! \brief Base class for all content that exists on the battle field
- * 
+ *
  *  \class Entity
- * 
+ *
  * Moving on a battle field consisting of a 6x3 grid requires specific
  * behavior. To appear authentic, the entities that exist on the field
  * must abide by special movement rules. Movement is on a per-tile basis
- * and entities can only appear on one tile at a time. 
- * 
+ * and entities can only appear on one tile at a time.
+ *
  * Entities by themselves respond to no collision and knows nothing
  * about health points. Entities only know about the tile they are on,
  * their element if any, their team, their passthrough properties,
- * and maintain a list of Components that may alter their behavior in 
+ * and maintain a list of Components that may alter their behavior in
  * battle.
  */
 
@@ -25,7 +25,7 @@ using std::string;
 #include "bnAnimation.h"
 #include "bnDirection.h"
 #include "bnTeam.h"
-#include "bnTextureType.h"
+#include "bnResourcePaths.h"
 #include "bnElements.h"
 #include "bnComponent.h"
 #include "bnEventBus.h"
@@ -75,7 +75,7 @@ struct CombatHitProps {
   Hit::Properties hitbox; // original hitbox data
   Hit::Properties filtered; // statuses after defense rules pass
 
-  CombatHitProps(const Hit::Properties& original, const Hit::Properties& props) : 
+  CombatHitProps(const Hit::Properties& original, const Hit::Properties& props) :
     hitbox(original), filtered(props)
   {}
 
@@ -124,6 +124,7 @@ private:
   Component::ID_t lastComponentID{}; /*!< Entities keep track of new components to run through scene injection later. */
   bool hasSpawned{ false }; /*!< Flag toggles true when the entity is first placed onto the field. Calls OnSpawn(). */
   bool isUpdating{ false }; /*!< If an entity has updated once this frame, skip some update routines */
+  bool manualDelete{ false }; /* HACK: prevent network pawns from deleting until they report their HP as zero */
   unsigned moveEventFrame{};
   unsigned frame{};
   float currJumpHeight{};
@@ -132,7 +133,10 @@ private:
   MoveEvent currMoveEvent{};
   VirtualInputState inputState;
   std::shared_ptr<SpriteProxyNode> shadow{ nullptr };
-
+  std::shared_ptr<SpriteProxyNode> iceFx{ nullptr };
+  std::shared_ptr<SpriteProxyNode> blindFx{ nullptr };
+  std::shared_ptr<SpriteProxyNode> confusedFx{ nullptr };
+  Animation iceFxAnimation, blindFxAnimation, confusedFxAnimation;
   /**
    * @brief Frees one component with the same ID
    * @param ID ID of the component to remove
@@ -179,14 +183,14 @@ public:
    * @brief Entity::Update(dt) contains particular steps that gaurantee frame accuracy for child types
    */
   virtual void Update(double _elapsed);
-  
+
   void RefreshShader();
   void draw(sf::RenderTarget& target, sf::RenderStates states) const final;
 
   /**
    * @brief Move to any tile on the field
    * @return true if the move action was queued. False if obstructed.
-   * 
+   *
    * @warning This doesn't mean that the entity will successfully move just that they could at the time
    */
   bool Teleport(Battle::Tile* dest, ActionOrder order = ActionOrder::voluntary, std::function<void()> onBegin = [] {});
@@ -226,7 +230,7 @@ public:
    * This function dictates the rules of when an entity can move.
    * Some implementation exampes are when bosses can teleport to the player's area
    * only when their state permits it. It will return true in that case but false
-   * when the boss is not attacking and shall only be allowed to roam on their 
+   * when the boss is not attacking and shall only be allowed to roam on their
    * team's side.
    * @param next The tile to query.
    * @return true if the entity can move to the tile, false if not permitted.
@@ -235,12 +239,12 @@ public:
 
   /**
    * @brief Entity's ID
-   * @return ID 
+   * @return ID
    */
   const ID_t GetID() const;
 
   /**
-   * @brief Checks to see if the input team is friendly 
+   * @brief Checks to see if the input team is friendly
    * @param _team
    * @return true if the input team is the same or friendly, false if they are opposing teams
    */
@@ -253,7 +257,7 @@ public:
    * @param _tile
    */
   void SetTile(Battle::Tile* _tile);
-  
+
   /**
    * @brief Get a pointer to a tile based upon the Entity's position.
    * If no arguments are provided, it will return a pointer to the tile they are currently on.
@@ -303,9 +307,9 @@ public:
    * @return Current Team
    */
   Team GetTeam() const;
-  
+
   /**
-   * @brief Assigns team 
+   * @brief Assigns team
    * @param _team the team to assign
    */
   void SetTeam(Team _team);
@@ -315,7 +319,7 @@ public:
    * @param state set true for passthrough, set false to be tangible
    */
   void SetPassthrough(bool state);
-  
+
   /**
    * @brief Get the passthrough state
    * @return true if passthrough, false if tangible
@@ -324,7 +328,7 @@ public:
 
   /**
    * @brief Sets the opacity level of this entity
-   * @param value range from 0-255 
+   * @param value range from 0-255
    */
   void SetAlpha(int value);
 
@@ -335,7 +339,7 @@ public:
    * @param state set true to enable, false to disable
    */
   void SetFloatShoe(bool state);
-  
+
   /**
    * @brief Enable or disable AirShoe
    * @param state set true to enable, false to disable
@@ -346,13 +350,13 @@ public:
   * @brief prevents tile slide events like ice
   */
   void SlidesOnTiles(bool state);
-  
+
   /**
    * @brief Query if entity has FloatShoe enabled
    * @return true if Floatshoe is enabled, false otherwise
    */
   bool HasFloatShoe();
-  
+
   /**
    * @brief Query if entity has AirShoe enabled
    * @return true if AirShoe is enabled, false otherwise
@@ -362,19 +366,19 @@ public:
   bool WillSlideOnTiles();
 
   /**
-   * @brief Directly modify the entity's current move direction property. @see Entity::Move() 
+   * @brief Directly modify the entity's current move direction property. @see Entity::Move()
    * Direction can be used for entities that use a single direction for linear movement.
    * e.g. Mettaur Waves, Bullet, Fishy
    * @param direction the new direction
    */
   void SetMoveDirection(Direction direction);
-  
+
   /**
    * @brief Query the entity's move direction
    * @return The entity's current move direction
    */
   Direction GetMoveDirection();
-  
+
   void SetFacing(Direction facing);
   Direction GetFacing();
   Direction GetFacingAway();
@@ -393,10 +397,10 @@ public:
   void Delete();
 
   /**
-  * @brief Flags the entity to be pruned from the field 
+  * @brief Flags the entity to be pruned from the field
   */
   void Erase();
-  
+
   /**
    * @brief Query if an entity has been deleted but not erased this frame
    * @return true if flagged for deletion, false otherwise
@@ -415,23 +419,23 @@ public:
    * @param _elem the element to change to
    */
   void SetElement(Element _elem);
-  
+
   /**
    * @brief Query the element of the entity
    * @return Returns the current element
    */
   const Element GetElement() const;
-  
+
   /**
    * @brief Takes an input elements and returns if the element is super effective against this entity
-   * Wood > Electric > Aqua > Fire > Wood 
+   * Wood > Electric > Aqua > Fire > Wood
    * @param _other the other element
    * @return true if super effective, false if not
    */
   const bool IsSuperEffective(Element _other) const;
-  
+
   /**
-   * @brief Forces the entity to adopt the next tile pointer 
+   * @brief Forces the entity to adopt the next tile pointer
    */
   void AdoptNextTile();
 
@@ -442,7 +446,7 @@ public:
    * @param state true to freeze time, false if ongoing
    */
   void ToggleTimeFreeze(bool state);
-  
+
   /**
    * @brief Query if entity is time frozen
    * @return true if entity is time frozen, false if active
@@ -549,10 +553,10 @@ public:
 
   /**
    * @brief Get the character's current health
-   * @return 
+   * @return
    */
   virtual int GetHealth() const;
-  
+
   /**
  * @brief Set the max health of the character
  * @param _health
@@ -561,7 +565,7 @@ public:
 
   /**
    * @brief Get the character's max (init) health
-   * @return 
+   * @return
    */
   const int GetMaxHealth() const;
 
@@ -570,15 +574,20 @@ public:
    * @param _health
    */
   void SetHealth(int _health);
-  
+
+  /**
+   * @brief Returns true if the counter flag is on
+   */
+  bool IsCounterable();
+
   /**
    * @brief Sets counter flag on
    * @param on
-   * 
-   * Used by counter frames. 
+   *
+   * Used by counter frames.
    */
   void ToggleCounter(bool on = true);
-  
+
   void NeverFlip(bool enabled);
 
   /**
@@ -594,11 +603,29 @@ public:
   bool IsRooted();
 
   /**
+   * @brief Query the character's state is Ice Frozen
+   * @return true if character is currently frozen from hitbox status effects, false otherwise
+   */
+  bool IsIceFrozen();
+
+  /**
+  * @brief Query the character's state is Blind
+  * @return true if character is currently blind from hitbox status effects, false otherwise
+  */
+  bool IsBlind();
+
+  /**
+   * @brief Query the character's state is confused
+   * @return true if character is currently confused from hitbox status effects, false otherwise
+   */
+  bool IsConfused();
+
+  /**
    * @brief Some characters allow others to move on top of them
    * @param enabled true, characters can share space, false otherwise
    */
   void ShareTileSpace(bool enabled);
-  
+
   /**
    * @brief Query if entity can share space
    * @return true if shareTilespace is enabled, false otherwise
@@ -622,7 +649,7 @@ public:
    * @param name
    */
   void SetName(std::string name);
-  
+
   /**
    * @brief Get name of character
    * @return const std::string
@@ -665,13 +692,13 @@ public:
   /**
    * @brief Describes how the spell attacks characters
    * @param _entity
-   * 
+   *
    * This is where you would check for specific character types
    * if there are special conditions. Call Hit() on the entity
    * to deal damage.
    */
   virtual void Attack(std::shared_ptr<Entity> _entity) { };
-  
+
   /**
   * @brief Describes what happens when this attack collides with a character, regardless of defenses
   *
@@ -683,7 +710,7 @@ public:
   /**
    * @brief Toggle whether or not to highlight a tile
    * @param mode
-   * 
+   *
    * FLASH - flicker every other frame
    * SOLID - Stay yellow
    * NONE  - this is the default. No effects are applied.
@@ -707,7 +734,7 @@ public:
    * @param props
    */
   void SetHitboxProperties(Hit::Properties props);
-  
+
   /**
    * @brief Get the hitbox properties of this spell
    * @return const Hit::Properties
@@ -733,7 +760,10 @@ public:
   void RegisterStatusCallback(const Hit::Flags& flag, const StatusCallback& callback);
 
 
-protected:  
+  // NOTE: Netplay hack until lockstep is perfect
+  void ManualDelete();
+
+protected:
   Battle::Tile* tile{ nullptr }; /*!< Current tile pointer */
   Battle::Tile* previous{ nullptr }; /*!< Entities retain a previous pointer in case they need to be moved back */
   sf::Vector2f tileOffset{ 0,0 }; /*!< complete motion is captured by `tile_pos + tileOffset`*/
@@ -745,9 +775,13 @@ protected:
   ActionQueue actionQueue;
   frame_time_t moveStartupDelay{};
   std::optional<frame_time_t> moveEndlagDelay;
-  double stunCooldown{ 0 }; /*!< Timer until stun is over */
-  double rootCooldown{ 0 }; /*!< Timer until root is over */
-  double invincibilityCooldown{ 0 }; /*!< Timer until invincibility is over */
+  frame_time_t stunCooldown{ 0 }; /*!< Timer until stun is over */
+  frame_time_t rootCooldown{ 0 }; /*!< Timer until root is over */
+  frame_time_t freezeCooldown{ 0 }; /*!< Timer until freeze is over */
+  frame_time_t blindCooldown{ 0 }; /*!< Timer until blind is over */
+  frame_time_t confusedCooldown{ 0 }; /*!< Timer until confusion is over */
+  frame_time_t confusedSfxCooldown{ 0 }; /*!< Timer to replay confusion SFX */
+  frame_time_t invincibilityCooldown{ 0 }; /*!< Timer until invincibility is over */
   bool counterable{};
   bool neverFlip{};
   bool hit{}; /*!< Was hit this frame */
@@ -775,7 +809,7 @@ protected:
   * Used internally by class
   *
   */
-  void Stun(double maxCooldown);
+  void Stun(frame_time_t maxCooldown);
 
   /**
   * @brief Stop a character from moving for maxCooldown seconds
@@ -783,14 +817,31 @@ protected:
   * Used internally by class
   *
   */
-  void Root(double maxCooldown);
+  void Root(frame_time_t maxCooldown);
 
   /**
-  * @brief Query if an attack successfully countered a Character
-  * @return true if character is currently countered, false otherwise
+  * @brief Stop a character from moving for maxCooldown seconds
+  * @param maxCooldown
   * Used internally by class
+  *
   */
-  bool IsCountered();
+  void IceFreeze(frame_time_t maxCooldown);
+
+  /**
+  * @brief This entity should not see opponents for maxCooldown seconds
+  * @param maxCooldown
+  * Used internally by class
+  *
+  */
+  void Blind(frame_time_t maxCooldown);
+
+  /**
+  * @brief This entity have their controls reversed for maxCooldown seconds
+  * @param maxCooldown
+  * Used internally by class
+  *
+  */
+  void Confuse(frame_time_t maxCooldown);
 
   /**
   * Can override to provide custom behavior for when an Entity is countered

@@ -8,8 +8,8 @@
 
 #include <iostream>
 
-PlayerControlledState::PlayerControlledState() : 
-  AIState<Player>(), 
+PlayerControlledState::PlayerControlledState() :
+  AIState<Player>(),
   InputHandle(),
   isChargeHeld(false)
 {
@@ -40,17 +40,15 @@ void PlayerControlledState::OnUpdate(double _elapsed, Player& player) {
 
   // Are we creating an action this frame?
   if (player.InputState().Has(InputEvents::pressed_use_chip)) {
-    auto cardsUI = player.GetFirstComponent<PlayerSelectedCardsUI>();
-    if (cardsUI && player.CanAttack()) {
-      if (cardsUI->UseNextCard()) {
-        player.chargeEffect->SetCharging(false);
-        isChargeHeld = false;
-      }
+    std::shared_ptr<PlayerSelectedCardsUI> cardsUI = player.GetFirstComponent<PlayerSelectedCardsUI>();
+    if (cardsUI && cardsUI->UseNextCard()) {
+      player.chargeEffect->SetCharging(false);
+      isChargeHeld = false;
     }
     // If the card used was successful, we may have a card in queue
   }
   else if (player.InputState().Has(InputEvents::released_special)) {
-    const auto actions = player.AsyncActionList();
+    const std::vector<std::shared_ptr<CardAction>> actions = player.AsyncActionList();
     bool canUseSpecial = player.CanAttack();
 
     // Just make sure one of these actions are not from an ability
@@ -69,8 +67,10 @@ void PlayerControlledState::OnUpdate(double _elapsed, Player& player) {
     player.Attack();
 
   } else if (player.InputState().Has(InputEvents::held_shoot)) {
-    isChargeHeld = true;
-    player.chargeEffect->SetCharging(true);
+    if (actionable || player.IsMoving()) {
+      isChargeHeld = true;
+      player.chargeEffect->SetCharging(true);
+    }
   }
 
   // Movement increments are restricted based on anim speed at this time
@@ -90,9 +90,13 @@ void PlayerControlledState::OnUpdate(double _elapsed, Player& player) {
     direction = player.GetTeam() == Team::red ? Direction::right : Direction::left;
   }
 
+  if (player.IsConfused()) {
+    direction = Reverse(direction);
+  }
+
   if(direction != Direction::none && actionable && !player.IsRooted()) {
-    auto next_tile = player.GetTile() + direction;
-    auto anim = player.GetFirstComponent<AnimationComponent>();
+    Battle::Tile* next_tile = player.GetTile() + direction;
+    std::shared_ptr<AnimationComponent> anim = player.GetFirstComponent<AnimationComponent>();
 
     auto onMoveBegin = [player = &player, next_tile, this, anim] {
       const std::string& move_anim = player->GetMoveAnimHash();
@@ -114,7 +118,7 @@ void PlayerControlledState::OnUpdate(double _elapsed, Player& player) {
     else {
       player.Teleport(next_tile, ActionOrder::voluntary, onMoveBegin);
     }
-  } 
+  }
 }
 
 void PlayerControlledState::OnLeave(Player& player) {

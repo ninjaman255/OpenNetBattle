@@ -12,19 +12,20 @@
 #include "../bnLuaLibraryPackageManager.h"
 #include "../bindings/bnScriptedCard.h"
 #include "../bindings/bnScriptedBlock.h"
+#include "../bnRandom.h"
 #include <Segues/PixelateBlackWashFade.h>
 
 constexpr std::string_view CACHE_FOLDER = "cache";
 
 // class DownloadScene
-DownloadScene::DownloadScene(swoosh::ActivityController& ac, const DownloadSceneProps& props) : 
+DownloadScene::DownloadScene(swoosh::ActivityController& ac, const DownloadSceneProps& props) :
   downloadSuccess(props.downloadSuccess),
   coinFlip(props.coinFlip),
   lastScreen(props.lastScreen),
   playerHash(props.playerHash),
   remotePlayer(props.remotePlayer),
   remoteBlocks(props.remotePlayerBlocks),
-  label(Font::Style::tiny),
+  label(Font::Style::small),
   Scene(ac)
 {
   playerCardPackageList = props.cardPackageHashes;
@@ -36,7 +37,7 @@ DownloadScene::DownloadScene(swoosh::ActivityController& ac, const DownloadScene
   std::sort(playerBlockPackageList.begin(), playerBlockPackageList.end());
   playerBlockPackageList.erase(std::unique(playerBlockPackageList.begin(), playerBlockPackageList.end()), playerBlockPackageList.end());
 
-  downloadSuccess = false; 
+  downloadSuccess = false;
 
   packetProcessor = props.packetProcessor;
   packetProcessor->SetKickCallback([this] {
@@ -58,11 +59,15 @@ DownloadScene::DownloadScene(swoosh::ActivityController& ac, const DownloadScene
     this->ProcessPacketBody(header, body);
   });
 
-  blur.setPower(40);
-  blur.setTexture(&lastScreen);
-
   bg = sf::Sprite(lastScreen);
   bg.setColor(sf::Color(255, 255, 255, 200));
+
+  overlayTex = Textures().LoadFromFile("resources/scenes/download/overlay.png");
+  overlay.setTexture(*overlayTex.get(), true);
+  overlay.setScale(2.f, 2.f);
+
+  downloadComplete = Audio().LoadFromFile("resources/sfx/compile_complete.ogg");
+  downloadItem = Audio().LoadFromFile("resources/sfx/compile_item.ogg");
 
   setView(sf::Vector2u(480, 320));
 
@@ -81,11 +86,12 @@ void DownloadScene::SendHandshake()
   Poco::Buffer<char> buffer(0);
   BufferWriter writer;
   writer.Write(buffer, NetPlaySignals::download_handshake);
-  
-  mySeed = getController().GetRandSeed();
-  writer.Write(buffer, mySeed);
 
-  auto id = packetProcessor->SendPacket(Reliability::ReliableOrdered, buffer).second;
+  // create a new seed based on the time to avoid using the same seed every battle
+  mySeed = (unsigned int)time(0);
+  writer.Write<uint32_t>(buffer, mySeed);
+
+  uint64_t id = packetProcessor->SendPacket(Reliability::ReliableOrdered, buffer).second;
   packetProcessor->UpdateHandshakeID(id);
 
   Logger::Logf(LogLevel::info, "Sending handshake");
@@ -105,9 +111,13 @@ void DownloadScene::SendCoinFlip() {
 
   getController().SeedRand(static_cast<unsigned>(time.count()));
 
-  coinValue = rand();
+  // this is intentionally desynced here from the SeedRand above, but syncs back up later when the scene exits to pvp
+  // we want to use the same random generator due to implemenation differences of RAND_MAX
+  // on linux RAND_MAX is 2147483647 while on windows it is 32767,
+  // giving a far higher probability of being player 2 on linux when using rand() instead of SyncedRand()
+  coinValue = SyncedRand();
 
-  writer.Write(buffer, coinValue);
+  writer.Write<uint32_t>(buffer, coinValue);
 
   Logger::Logf(LogLevel::debug, "Coin value was %i with seed %u", coinValue, getController().GetRandSeed());
 
@@ -345,6 +355,7 @@ void DownloadScene::RecieveTradeCardPackageData(const Poco::Buffer<char>& buffer
 
   // move to the next state
   if (requestList.size()) {
+    remoteCardPackageList = requestList;
     Logger::Logf(LogLevel::info, "Need to download %d card packages", requestList.size());
     RequestCardPackageList(requestList);
   }
@@ -391,7 +402,7 @@ void DownloadScene::RecieveTradeBlockPackageData(const Poco::Buffer<char>& buffe
 void DownloadScene::RecieveHandshake(const Poco::Buffer<char>& buffer)
 {
   BufferReader reader;
-  unsigned int seed = reader.Read<unsigned int>(buffer);
+  unsigned int seed = reader.Read<uint32_t>(buffer);
   maxSeed = std::max(seed, mySeed);
 
   // mark handshake as completed
@@ -476,8 +487,8 @@ void DownloadScene::RecieveRequestBlockPackageData(const Poco::Buffer<char>& buf
 
 void DownloadScene::RecieveDownloadComplete(const Poco::Buffer<char>& buffer)
 {
-  bool result{};
-  std::memcpy(&result, buffer.begin(), sizeof(bool));
+  BufferReader reader;
+  bool result = reader.Read<bool>(buffer);
 
   if (result) {
     remoteSuccess = true;
@@ -496,7 +507,7 @@ void DownloadScene::RecieveTransition(const Poco::Buffer<char>& buffer)
   transitionToPvp = true;
 
   // sync seed
-  getController().SeedRand(maxSeed); 
+  getController().SeedRand(maxSeed);
   Logger::Logf(LogLevel::debug, "Using seed %d", maxSeed);
 }
 
@@ -525,7 +536,7 @@ void DownloadScene::DownloadPlayerData(const Poco::Buffer<char>& buffer)
   if (packageId.empty()) return;
   RemoveFromDownloadList(packageId);
 
-  size_t file_len = reader.Read<size_t>(buffer);
+  size_t file_len = reader.Read<uint32_t>(buffer);
   std::string path = "cache/" + stx::rand_alphanum(12) + ".zip";
 
   std::fstream file;
@@ -544,7 +555,7 @@ void DownloadScene::DownloadPlayerData(const Poco::Buffer<char>& buffer)
 
     result = RemotePlayerPartition().LoadPackageFromZip<ScriptedPlayer>(path);
   }
-  
+
   if (result.is_error()) {
     Logger::Logf(LogLevel::critical, "Failed to download custom navi with package ID %s: %s", packageId.c_str(), result.error_cstr());
 
@@ -555,30 +566,15 @@ void DownloadScene::DownloadPlayerData(const Poco::Buffer<char>& buffer)
 
 std::vector<PackageHash> DownloadScene::DeserializeListOfHashes(const Poco::Buffer<char>& buffer)
 {
-  size_t len{};
-  size_t read{};
-  std::vector<PackageHash> list;
+  BufferReader reader;
 
   // list length
-  std::memcpy(&len, buffer.begin() + read, sizeof(size_t));
-  read += sizeof(size_t);
+  auto len = reader.Read<uint8_t>(buffer);
+  std::vector<PackageHash> list;
 
   while (len > 0) {
-    // package id
-    size_t id_len{};
-    std::memcpy(&id_len, buffer.begin() + read, sizeof(size_t));
-    read += sizeof(size_t);
-
-    std::string id = std::string(buffer.begin() + read, id_len);
-    read += id_len;
-
-    // md5
-    size_t md5_len{};
-    std::memcpy(&md5_len, buffer.begin() + read, sizeof(size_t));
-    read += sizeof(size_t);
-
-    std::string md5 = std::string(buffer.begin() + read, md5_len);
-    read += md5_len;
+    std::string id = reader.ReadString<uint8_t>(buffer);
+    std::string md5 = reader.ReadString<uint8_t>(buffer);
 
     list.push_back({ id, md5 });
 
@@ -590,28 +586,23 @@ std::vector<PackageHash> DownloadScene::DeserializeListOfHashes(const Poco::Buff
 
 Poco::Buffer<char> DownloadScene::SerializeListOfHashes(NetPlaySignals header, const std::vector<PackageHash>& list)
 {
-  Poco::Buffer<char> data{ 0 };
+  Poco::Buffer<char> buffer{ 0 };
+  BufferWriter writer;
 
   // header
-  data.append((char*)&header, sizeof(NetPlaySignals));
+  writer.Write(buffer, header);
 
   // list length
   size_t len = list.size();
-  data.append((char*)&len, sizeof(size_t));
+  writer.Write<uint8_t>(buffer, (uint8_t)list.size());
 
   for(const PackageHash& hash : list) {
-    // package id
-    size_t sz = hash.packageId.length();
-    data.append((char*)&sz, sizeof(size_t));
-    data.append(hash.packageId.c_str(), hash.packageId.length());
-
-    // md5
-    sz = hash.md5.length();
-    data.append((char*)&sz, sizeof(size_t));
-    data.append(hash.md5.c_str(), hash.md5.length());
+    // package id + md5
+    writer.WriteString<uint8_t>(buffer, hash.packageId);
+    writer.WriteString<uint8_t>(buffer, hash.md5);
   }
 
-  return data;
+  return buffer;
 }
 
 template<template<typename> class PackageManagerType, class MetaType>
@@ -630,7 +621,7 @@ void DownloadScene::DownloadPackageData(const Poco::Buffer<char>& buffer, Packag
   if (packageId.empty()) return;
   RemoveFromDownloadList(packageId);
 
-  size_t file_len = reader.Read<size_t>(buffer);
+  size_t file_len = reader.Read<uint32_t>(buffer);
   std::string path = "cache/" + stx::rand_alphanum(12) + ".zip";
 
   std::fstream file;
@@ -666,7 +657,7 @@ Poco::Buffer<char> DownloadScene::SerializePackageData(const std::string& packag
 
   BufferWriter writer;
   size_t len = 0;
-  
+
   auto result = packageManager.GetPackageFilePath(packageId);
   if (result.is_error()) {
     Logger::Logf(LogLevel::critical, "Could not serialize package: %s", result.error_cstr());
@@ -675,12 +666,12 @@ Poco::Buffer<char> DownloadScene::SerializePackageData(const std::string& packag
     SendDownloadComplete(false);
   }
   else {
-    std::string path = result.value();
-    
-    if (auto result = stx::zip(path, path + ".zip"); result.value()) {
-      path = path + ".zip";
+    std::filesystem::path path = result.value();
+    std::filesystem::path zipPath = path;
+    zipPath.concat(".zip");
 
-      std::ifstream fs(path, std::ios::binary | std::ios::ate);
+    if (auto result = stx::zip(path, zipPath); result.value()) {
+      std::ifstream fs(zipPath, std::ios::binary | std::ios::ate);
       std::ifstream::pos_type pos = fs.tellg();
       len = pos;
       fileBuffer.resize(len);
@@ -696,7 +687,7 @@ Poco::Buffer<char> DownloadScene::SerializePackageData(const std::string& packag
   writer.WriteTerminatedString(buffer, packageId);
 
   // file size
-  writer.Write<size_t>(buffer, len);
+  writer.Write<uint32_t>(buffer, len);
 
   // file contents
   writer.WriteBytes<char>(buffer, fileBuffer.data(), fileBuffer.size());
@@ -731,7 +722,7 @@ void DownloadScene::onUpdate(double elapsed)
 
   SendPing();
 
-  if (aborting) {
+  if (aborting || sf::Keyboard::isKeyPressed(sf::Keyboard::Escape)) {
     abortingCountdown -= from_seconds(elapsed);
     if (abortingCountdown <= frames(0)) {
       // abort match
@@ -741,72 +732,86 @@ void DownloadScene::onUpdate(double elapsed)
 
     return;
   }
-  
+
   if (AllTasksComplete()) {
     SendDownloadComplete(true);
 
     if (downloadSuccess && remoteSuccess) {
       SendTransition();
+
+      if (!downloadSoundPlayed && remainingTokens >= maxTokens && maxTokens > 0) {
+        downloadSoundPlayed = true;
+        Audio().Play(downloadComplete);
+      }
     }
   }
 
+  if(!downloadSoundPlayed) {
+    // If this sfx hasn't played the "download" isn't caught up in the render step,
+    // so play some busy sounds while we wait
+    Audio().Play(downloadItem, AudioPriority::high);
+  }
+
+  elapsedFrames += from_seconds(elapsed);
+
   if (transitionToPvp) {
-    getController().pop();
+    // re-using aborting countdown as a way to delay the transition
+    abortingCountdown -= from_seconds(elapsed);
+    if (abortingCountdown <= frames(0)) {
+      getController().pop();
+    }
   }
 }
 
 void DownloadScene::onDraw(sf::RenderTexture& surface)
 {
-  auto& packageManager = RemoteCardPartition();
-
-  surface.draw(bg);
-  blur.apply(surface);
-
-  float w = static_cast<float>(getController().getVirtualWindowSize().x);
-  float h = static_cast<float>(getController().getVirtualWindowSize().y);
-
-  // 1. Draw the state status info
-  if (AllTasksComplete()) {
-    label.SetString("Complete, waiting...");
-
-    auto bounds = label.GetLocalBounds();
-    label.setOrigin(sf::Vector2f(bounds.width * label.getScale().x, 0));
-    label.setPosition(w, 0);
-    label.SetColor(sf::Color::Green);
-    surface.draw(label);
-    return;
+  if (inView) {
+    surface.draw(bg);
   }
 
-  auto bounds = label.GetLocalBounds();
-  label.setOrigin(sf::Vector2f(bounds.width * label.getScale().x , 0));
-  label.setPosition(w, 0);
+  float w = static_cast<float>(getController().getVirtualWindowSize().x);
+  float h = 30;
+
+  // re-position
+  sf::FloatRect bounds = label.GetLocalBounds();
   label.SetColor(sf::Color::White);
-  surface.draw(label);
 
   sf::Sprite icon;
 
-  for (auto& [key, value] : contentToDownload) {
-    if (!packageManager.HasPackage(key)) continue;
+  // speed up if screen is about to leave
+  int tokens = !transitionToPvp ? elapsedFrames.count() * 2 : (elapsedFrames.count() * (100 / std::max(1, (int)abortingCountdown.count())));
+  remainingTokens = tokens;
+  maxTokens = 0;
 
-    label.SetString(key + " - " + value);
+  CardPackageManager& packageManager = RemoteCardPartition();
+  for (std::string& id : remoteCardPackageList) {
+    if (!packageManager.HasPackage(id)) continue;
 
-    auto bounds = label.GetLocalBounds();
-    float ydiff = bounds.height * label.getScale().y;
+    CardMeta& meta = packageManager.FindPackageByID(id);
+    std::string str = meta.properties.shortname + " - " + id;
+    maxTokens += str.size();
+    if (str.size() > remainingTokens) {
+      str = str.substr(0, remainingTokens);
+    }
+    label.SetString(str);
+    remainingTokens = std::max(0u, (unsigned)(remainingTokens - str.size()));
 
-    if (auto iconTexture = packageManager.FindPackageByID(key).GetIconTexture()) {
+    sf::FloatRect bounds = label.GetLocalBounds();
+    if (std::shared_ptr<sf::Texture> iconTexture = meta.GetIconTexture()) {
       icon.setTexture(*iconTexture, true);
       float iconHeight = icon.getLocalBounds().height;
-      icon.setOrigin(0, iconHeight);
+      icon.setPosition(20, h);
+      icon.setOrigin(0, iconHeight/4);
+      surface.draw(icon);
     }
 
-    icon.setPosition(sf::Vector2f(bounds.width + 5.0f, bounds.height));
-    label.setOrigin(sf::Vector2f(0, 0));
-    label.setPosition(0, h);
+    label.setPosition(20 + 16 + 2, h);
 
-    h += ydiff + 5.0f;
+    h += 15.0f;
 
     surface.draw(label);
   }
+  surface.draw(overlay);
 }
 
 void DownloadScene::onLeave()
@@ -823,6 +828,7 @@ void DownloadScene::onEnter()
 
 void DownloadScene::onStart()
 {
+  inView = true;
 }
 
 void DownloadScene::onResume()

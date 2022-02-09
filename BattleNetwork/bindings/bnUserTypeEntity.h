@@ -5,6 +5,7 @@
 #include "bnWeakWrapper.h"
 #include "bnUserTypeAnimation.h"
 #include "bnScriptedComponent.h"
+#include "bnScriptedDefenseRule.h"
 #include "../bnEntity.h"
 #include "../bnAnimationComponent.h"
 #include "../bnSolHelpers.h"
@@ -58,6 +59,12 @@ void DefineEntityFunctionsOn(sol::basic_usertype<WeakWrapper<E>, sol::basic_refe
   entity_table["set_facing"] = [](WeakWrapper<E>& entity, Direction direction) {
     entity.Unwrap()->SetFacing(direction);
   };
+  entity_table["get_move_direction"] = [](WeakWrapper<E>& entity)->Direction {
+    return entity.Unwrap()->GetMoveDirection();
+  };
+  entity_table["set_move_direction"] = [](WeakWrapper<E>& entity, Direction direction) {
+    entity.Unwrap()->SetMoveDirection(direction);
+  };
   entity_table["get_color"] = [](WeakWrapper<E>& entity) -> sf::Color {
     return entity.Unwrap()->getColor();
   };
@@ -78,6 +85,10 @@ void DefineEntityFunctionsOn(sol::basic_usertype<WeakWrapper<E>, sol::basic_refe
   };
   entity_table["reveal"] = [](WeakWrapper<E>& entity) {
     entity.Unwrap()->Reveal();
+  };
+  entity_table["can_move_to"] = [](WeakWrapper<E>& entity, Battle::Tile* tile) -> bool {
+    if (!tile) return false;
+    return entity.Unwrap()->CanMoveTo(tile);
   };
   entity_table["teleport"] = sol::overload(
     [](
@@ -197,6 +208,9 @@ void DefineEntityFunctionsOn(sol::basic_usertype<WeakWrapper<E>, sol::basic_refe
   entity_table["is_moving"] = [](WeakWrapper<E>& entity) -> bool {
     return entity.Unwrap()->IsMoving();
   };
+  entity_table["set_passthrough"] = [](WeakWrapper<E>& entity, bool passthrough) {
+    entity.Unwrap()->SetPassthrough(passthrough);
+  };
   entity_table["is_passthrough"] = [](WeakWrapper<E>& entity) -> bool {
     return entity.Unwrap()->IsPassthrough();
   };
@@ -226,12 +240,22 @@ void DefineEntityFunctionsOn(sol::basic_usertype<WeakWrapper<E>, sol::basic_refe
   entity_table["register_component"] = [](WeakWrapper<E>& entity, WeakWrapper<ScriptedComponent>& component) {
     entity.Unwrap()->RegisterComponent(component.UnwrapAndRelease());
   };
-  entity_table["add_defense_rule"] = [](WeakWrapper<E>& entity, DefenseRule& defenseRule) {
-    entity.Unwrap()->AddDefenseRule(defenseRule.shared_from_this());
-  };
-  entity_table["remove_defense_rule"] = [](WeakWrapper<E>& entity, DefenseRule* defenseRule) {
-    entity.Unwrap()->RemoveDefenseRule(defenseRule);
-  };
+  entity_table["add_defense_rule"] = sol::overload(
+    [](WeakWrapper<E>& entity, WeakWrapper<DefenseRule> defenseRule) {
+      entity.Unwrap()->AddDefenseRule(defenseRule.UnwrapAndRelease());
+    },
+    [](WeakWrapper<E>& entity, WeakWrapper<ScriptedDefenseRule> defenseRule) {
+      entity.Unwrap()->AddDefenseRule(defenseRule.UnwrapAndRelease());
+    }
+  );
+  entity_table["remove_defense_rule"] = sol::overload(
+    [](WeakWrapper<E>& entity, WeakWrapper<DefenseRule> defenseRule) {
+      entity.Unwrap()->RemoveDefenseRule(defenseRule.Unwrap());
+    },
+    [](WeakWrapper<E>& entity, WeakWrapper<ScriptedDefenseRule> defenseRule) {
+      entity.Unwrap()->RemoveDefenseRule(defenseRule.Unwrap());
+    }
+  );
   entity_table["ignore_common_aggressor"] = [](WeakWrapper<E>& entity, bool enable) {
     entity.Unwrap()->IgnoreCommonAggressor(enable);
   };
@@ -328,6 +352,12 @@ void DefineEntityFunctionsOn(sol::basic_usertype<WeakWrapper<E>, sol::basic_refe
   };
   entity_table["toggle_hitbox"] = [](WeakWrapper<E>& entity, bool enabled) {
     return entity.Unwrap()->EnableHitbox(enabled);
+  };
+  entity_table["is_counterable"] = [](WeakWrapper<E>& entity) -> bool {
+    return entity.Unwrap()->IsCounterable();
+  };
+  entity_table["is_confused"] = [](WeakWrapper<E>& entity) -> bool {
+    return entity.Unwrap()->IsConfused();
   };
   entity_table["toggle_counter"] = [](WeakWrapper<E>& entity, bool on) {
     entity.Unwrap()->ToggleCounter(on);

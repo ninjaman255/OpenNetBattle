@@ -241,7 +241,7 @@ namespace Overworld {
         printName = "_" + printName; // add underscore brackets to output text
       }
 
-      size_t offset = static_cast<size_t>(12 * ease::linear(elapsed.asSeconds(), seconds_cast<float>(frames(2)), 1.0f));
+      size_t offset = static_cast<size_t>(13 * ease::linear(elapsed.asSeconds(), seconds_cast<float>(frames(2)), 1.0f));
       std::string substr = printName.substr(0, offset);
       areaLabel.SetString(substr);
     }).withDuration(frames(2));
@@ -254,7 +254,7 @@ namespace Overworld {
       .at(time_cast<sf::Time>(frames(14)))
       .doTask([=](sf::Time elapsed) {
         infoBox->Reveal();
-        infoBoxAnim.SyncTime(static_cast<float>(elapsed.asSeconds()));
+        infoBoxAnim.SyncTime(from_seconds(elapsed.asSeconds()));
         infoBoxAnim.Refresh(infoBox->getSprite());
       }).withDuration(frames(4));
 

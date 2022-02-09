@@ -11,7 +11,7 @@
 #include "bnCharacter.h"
 #include "bnEmotions.h"
 #include "bnPlayerState.h"
-#include "bnTextureType.h"
+#include "bnResourcePaths.h"
 #include "bnChargeEffectSceneNode.h"
 #include "bnAnimationComponent.h"
 #include "bnAI.h"
@@ -54,7 +54,7 @@ private:
   friend class PlayerIdleState;
   friend class PlayerHitState;
   friend class PlayerChangeFormState;
-
+  
   void SaveStats();
   void RevertStats();
   void CreateMoveAnimHash();
@@ -143,7 +143,7 @@ public:
   virtual std::shared_ptr<CardAction> OnExecuteBusterAction() = 0;
   virtual std::shared_ptr<CardAction> OnExecuteChargedBusterAction() = 0;
   virtual std::shared_ptr<CardAction> OnExecuteSpecialAction();
-  virtual frame_time_t CalculateChargeTime(const unsigned changeLevel);
+  virtual frame_time_t CalculateChargeTime(const unsigned chargeLevel);
 
   std::shared_ptr<CardAction> ExecuteBuster();
   std::shared_ptr<CardAction> ExecuteChargedBuster();

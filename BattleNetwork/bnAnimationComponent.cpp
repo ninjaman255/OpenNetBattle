@@ -16,22 +16,24 @@ AnimationComponent::~AnimationComponent() {
 
 void AnimationComponent::OnUpdate(double _elapsed)
 {
-  std::shared_ptr<Entity>  owner = GetOwner();
-  Character* character = dynamic_cast<Character*>(owner.get());
+  std::shared_ptr<Entity> owner = GetOwner();
 
-  // Since animations can be used on non-characters
-  // we check if the owning entity is non-null 
-  // we also check if it is a character, because stunned
-  // characters do not update
-  if (!owner || (character && character->IsStunned() && stunnedLastFrame)) {
+  // stunned entities do not update
+  if (!owner) return;
+
+  // `couldUpdateLastFrame` is used to allow animationComponent to update our frame-sensitive animations
+  // on the conditions that the entity would-be stunned this frame, the animation component will need present that correct frame outcome
+  // before halting due to status effects
+  bool canUpdateThisFrame = (!(owner->IsStunned() || owner->IsIceFrozen())) && couldUpdateLastFrame;
+  if (!canUpdateThisFrame) {
     return;
   }
 
-  stunnedLastFrame = (character && character->IsStunned());
+  couldUpdateLastFrame = canUpdateThisFrame;
   UpdateAnimationObjects(owner->getSprite(), _elapsed);
 }
 
-void AnimationComponent::SetPath(string _path)
+void AnimationComponent::SetPath(const std::filesystem::path& _path)
 {
   path = _path;
 }
@@ -56,7 +58,7 @@ const std::string AnimationComponent::GetAnimationString() const
   return animation.GetAnimationString();
 }
 
-const std::string& AnimationComponent::GetFilePath() const
+const std::filesystem::path& AnimationComponent::GetFilePath() const
 {
   return path;
 }
@@ -100,7 +102,7 @@ void AnimationComponent::SetAnimation(string state, char playbackMode, FrameFini
 
   animation << playbackMode << onFinish;
 
-  if (auto owner = GetOwner()) {
+  if (std::shared_ptr<Entity> owner = GetOwner()) {
     animation.Refresh(owner->getSprite());
   }
 }
@@ -109,7 +111,7 @@ void AnimationComponent::SetPlaybackMode(char playbackMode)
 {
   animation << playbackMode;
 
-  for (auto&& s : syncList) {
+  for (auto& s : syncList) {
     (*s.anim) << playbackMode;
   }
 }
@@ -123,7 +125,7 @@ void AnimationComponent::SetCounterFrameRange(int frameStart, int frameEnd)
   if (frameStart == frameEnd) frameEnd = frameEnd + 1;
   if (frameStart > frameEnd || frameStart <= 0 || frameEnd <= 0) return;
 
-  auto c = GetOwnerAs<Character>();
+  std::shared_ptr<Character> c = GetOwnerAs<Character>();
   if (c == nullptr) return;
 
   auto enableCounterable  = [c]() { c->ToggleCounter(); };
@@ -159,6 +161,11 @@ sf::Vector2f AnimationComponent::GetPoint(const std::string & pointName)
   return animation.GetPoint(pointName);
 }
 
+const bool AnimationComponent::HasPoint(const std::string& pointName)
+{
+  return animation.HasPoint(pointName);
+}
+
 Animation & AnimationComponent::GetAnimationObject()
 {
   return animation;
@@ -187,7 +194,7 @@ void AnimationComponent::SyncAnimation(std::shared_ptr<AnimationComponent> other
 void AnimationComponent::AddToSyncList(const AnimationComponent::SyncItem& item)
 {
   auto iter = std::find_if(syncList.begin(), syncList.end(), [item](auto in) {
-    return std::tie(in.anim, in.node, in.point) == std::tie(item.anim, item.node, item.point); 
+    return std::tie(in.anim, in.node, in.point) == std::tie(item.anim, item.node, item.point);
   });
 
   if (iter == syncList.end()) {
@@ -218,7 +225,7 @@ void AnimationComponent::SetInterruptCallback(const FrameFinishCallback& onInter
 
 void AnimationComponent::SetFrame(const int index)
 {
-  if (auto owner = GetOwner())
+  if (std::shared_ptr<Entity> owner = GetOwner())
   animation.SetFrame(index, owner->getSprite());
 
   for (auto& s : syncList) {
@@ -245,7 +252,7 @@ void AnimationComponent::RefreshSyncItem(AnimationComponent::SyncItem& item)
 
   // update node position in the animation
   auto baseOffset = GetPoint(item.point);
-  auto& origin = character->getSprite().getOrigin();
+  const sf::Vector2f& origin = character->getSprite().getOrigin();
   baseOffset = baseOffset - origin;
 
   item.node->setPosition(baseOffset);

@@ -1,8 +1,10 @@
 #include "bnAudioResourceManager.h"
+#include "bnFileUtil.h"
 #include "bnLogger.h"
 
 AudioResourceManager::AudioResourceManager(){
   midiMusic.loadSoundFontFromFile("resources/midi/soundfont.sf2");
+  midiMusic.setReverbActive(false);
 
   isEnabled = true;
 
@@ -23,7 +25,7 @@ AudioResourceManager::AudioResourceManager(){
 
 
 AudioResourceManager::~AudioResourceManager() {
-  // Stop playing everything 
+  // Stop playing everything
   stream.stop();
 
   for (int i = 0; i < NUM_OF_CHANNELS; i++) {
@@ -48,8 +50,8 @@ void AudioResourceManager::Mute(bool status)
     SetChannelVolume(channelVolume);
   }
   else {
-    auto streamBefore = streamVolume;
-    auto channelBefore = channelVolume;
+    float streamBefore = streamVolume;
+    float channelBefore = channelVolume;
     SetStreamVolume(0);
     SetChannelVolume(0);
     streamVolume = streamBefore;
@@ -118,8 +120,9 @@ void AudioResourceManager::LoadAllSources(std::atomic<int> &status) {
   LoadSource(AudioType::DEFORM, "resources/sfx/deform.ogg"); status++;
 }
 
-void AudioResourceManager::LoadSource(AudioType type, const std::string& path) {
-  if (!sources[static_cast<size_t>(type)].loadFromFile(path)) {
+void AudioResourceManager::LoadSource(AudioType type, const std::filesystem::path& path) {
+  std::unique_ptr<StdFilesystemInputStream> stream = std::make_unique<StdFilesystemInputStream>(path);
+  if (!sources[static_cast<size_t>(type)].loadFromStream(std::move(stream))) {
     Logger::Logf(LogLevel::critical, "Failed loading Audio(): %s\n", path.c_str());
 
   } else {
@@ -127,14 +130,15 @@ void AudioResourceManager::LoadSource(AudioType type, const std::string& path) {
   }
 }
 
-std::shared_ptr<sf::SoundBuffer> AudioResourceManager::LoadFromFile(const std::string& path)
+std::shared_ptr<sf::SoundBuffer> AudioResourceManager::LoadFromFile(const std::filesystem::path& path)
 {
   auto iter = cached.find(path);
   std::shared_ptr<sf::SoundBuffer> loaded;
 
   if (iter == cached.end()) {
     loaded = std::make_shared<sf::SoundBuffer>();
-    loaded->loadFromFile(path);
+    std::unique_ptr<StdFilesystemInputStream> stream = std::make_unique<StdFilesystemInputStream>(path);
+    loaded->loadFromStream(std::move(stream));
     cached.insert(std::make_pair(path, CachedResource<sf::SoundBuffer>(loaded)));
   }
   else {
@@ -142,6 +146,25 @@ std::shared_ptr<sf::SoundBuffer> AudioResourceManager::LoadFromFile(const std::s
   }
 
   return loaded;
+}
+
+void AudioResourceManager::HandleExpiredAudioCache()
+{
+  auto iter = cached.begin();
+  while (iter != cached.end()) {
+    if (iter->second.GetSecondsSinceLastRequest() > 60.0f) {
+      if (iter->second.IsInUse()) {
+        iter++; continue;
+      }
+
+      // 1 minute is long enough
+      Logger::Logf(LogLevel::debug, "Audio data %s expired", iter->first.c_str());
+      iter = cached.erase(iter);
+      continue;
+    }
+
+    iter++;
+  }
 }
 
 int AudioResourceManager::Play(AudioType type, AudioPriority priority) {
@@ -157,7 +180,7 @@ int AudioResourceManager::Play(AudioType type, AudioPriority priority) {
   if (priority < AudioPriority::high) {
     for (int i = 0; i < NUM_OF_CHANNELS; i++) {
       if (channels[i].buffer.getBuffer() == &sources[static_cast<size_t>(type)] && channels[i].buffer.getStatus() == sf::SoundSource::Status::Playing) {
-        auto howLongPlayed = channels[i].buffer.getPlayingOffset().asMilliseconds();
+        sf::Int32 howLongPlayed = channels[i].buffer.getPlayingOffset().asMilliseconds();
         if (howLongPlayed <= AUDIO_DUPLICATES_ALLOWED_IN_X_MILLISECONDS) {
           return -1;
         }
@@ -212,7 +235,7 @@ int AudioResourceManager::Play(AudioType type, AudioPriority priority) {
     for (int i = 0; i < NUM_OF_CHANNELS; i++) {
       if (channels[i].buffer.getStatus() == sf::SoundSource::Status::Playing) {
         if ((sf::SoundBuffer*)channels[i].buffer.getBuffer() == &sources[static_cast<size_t>(type)]) {
-          // Lowest priority or high priority sounds only play once 
+          // Lowest priority or high priority sounds only play once
           return -1;
         }
       }
@@ -230,7 +253,7 @@ int AudioResourceManager::Play(AudioType type, AudioPriority priority) {
       }
     }
     else { // HIGH PRIORITY will not overwrite other HIGH priorities unless they have ended
-      bool canOverwrite = channels[i].priority < AudioPriority::high 
+      bool canOverwrite = channels[i].priority < AudioPriority::high
         ||(channels[i].priority == AudioPriority::high && channels[i].buffer.getStatus() != sf::SoundSource::Status::Playing);
       if (canOverwrite) {
         channels[i].buffer.stop();
@@ -256,7 +279,7 @@ int AudioResourceManager::Play(std::shared_ptr<sf::SoundBuffer> resource, AudioP
   if (priority < AudioPriority::high) {
     for (int i = 0; i < NUM_OF_CHANNELS; i++) {
       if (channels[i].buffer.getBuffer() == resource.get() && channels[i].buffer.getStatus() == sf::SoundSource::Status::Playing) {
-        auto howLongPlayed = channels[i].buffer.getPlayingOffset().asMilliseconds();
+        sf::Int32 howLongPlayed = channels[i].buffer.getPlayingOffset().asMilliseconds();
         if (howLongPlayed <= AUDIO_DUPLICATES_ALLOWED_IN_X_MILLISECONDS) {
           return -1;
         }
@@ -312,7 +335,7 @@ int AudioResourceManager::Play(std::shared_ptr<sf::SoundBuffer> resource, AudioP
     for (int i = 0; i < NUM_OF_CHANNELS; i++) {
       if (channels[i].buffer.getStatus() == sf::SoundSource::Status::Playing) {
         if ((sf::SoundBuffer*)channels[i].buffer.getBuffer() == resource.get()) {
-          // Lowest priority or high priority sounds only play once 
+          // Lowest priority or high priority sounds only play once
           return -1;
         }
       }
@@ -346,39 +369,48 @@ int AudioResourceManager::Play(std::shared_ptr<sf::SoundBuffer> resource, AudioP
   return -1;
 }
 
-int AudioResourceManager::Stream(std::string path, bool loop, long long startMs, long long endMs) {
+int AudioResourceManager::Stream(const std::filesystem::path& path, bool loop, long long startMs, long long endMs) {
   if (!isEnabled) { return -1; }
 
   if (path == currStreamPath) { return -1; };
 
   currStreamPath = path;
 
-  // stop previous stream if any 
+  // stop previous stream if any
   stream.stop();
   midiMusic.stop();
 
-  if (!stream.openFromFile(path)) {
+  bool isMidi = false;
+  std::unique_ptr<StdFilesystemInputStream> istream = std::make_unique<StdFilesystemInputStream>(path);
+  char header[4];
+  if (istream->read(&header, sizeof(header)) == sizeof(header)) {
+    // All MIDI files have 4 bytes starting with "MThd".
+    isMidi = std::memcmp(header, "MThd", sizeof(header)) == 0;
+  }
+  istream->seek(0);
+
+  if (isMidi) {
     if (midiMusic.loadMidiFromFile(path)) {
       midiMusic.play();
       midiMusic.setLoop(loop);
       midiMusic.setPitch(1.f);
     }
+  } else {
+    if (stream.openFromStream(std::move(istream))) {
+      stream.play();
+      stream.setLoop(loop);
+      stream.setPitch(1.f);
 
-    return 0;
-  }
-
-  stream.play();
-  stream.setLoop(loop);
-  stream.setPitch(1.f);
-
-  if(loop && startMs > 0 && endMs > startMs) {
-    stream.setLoopPoints({ sf::milliseconds(startMs), sf::milliseconds(endMs) });
+      if(loop && startMs > 0 && endMs > startMs) {
+        stream.setLoopPoints({ sf::milliseconds(startMs), sf::milliseconds(endMs) });
+      }
+    }
   }
 
   return 0;
 }
 
-int AudioResourceManager::Stream(std::string path, bool loop) {
+int AudioResourceManager::Stream(const std::filesystem::path& path, bool loop) {
   return Stream(path, loop, -1, -1);
 }
 
@@ -390,6 +422,7 @@ void AudioResourceManager::StopStream() {
 void AudioResourceManager::SetStreamVolume(float volume) {
   stream.setVolume(volume);
   midiMusic.setVolume(volume);
+  midiMusic.setGain(1.5); // midi's are quiet, make them louder
   streamVolume = volume;
 }
 

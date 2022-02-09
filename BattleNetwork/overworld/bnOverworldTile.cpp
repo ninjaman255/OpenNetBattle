@@ -10,7 +10,8 @@ namespace Overworld {
     unsigned int gid,
     sf::Vector2f drawingOffset,
     sf::Vector2f alignmentOffset,
-    const std::string& typeString,
+    TileType::TileType type,
+    TileShadow::TileShadow shadow,
     const CustomProperties& customProperties,
     std::vector<std::unique_ptr<Shape>> collisionShapes
   ) :
@@ -18,8 +19,8 @@ namespace Overworld {
     gid(gid),
     drawingOffset(drawingOffset),
     alignmentOffset(alignmentOffset),
-    typeString(typeString),
-    type(TileType::FromString(typeString)),
+    type(type),
+    shadow(shadow),
     direction(FromString(customProperties.GetProperty("direction"))),
     customProperties(customProperties),
     collisionShapes(std::move(collisionShapes))
@@ -83,5 +84,19 @@ namespace Overworld {
     }
 
     return false;
+  }
+
+  Direction Tile::GetDirection(TileMeta& meta) {
+    auto direction = meta.direction;
+
+    if (flippedHorizontal) {
+      direction = FlipHorizontal(direction);
+    }
+
+    if (flippedVertical) {
+      direction = FlipVertical(direction);
+    }
+
+    return direction;
   }
 }

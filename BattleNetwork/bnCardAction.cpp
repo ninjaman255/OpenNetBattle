@@ -22,10 +22,10 @@ private:
 };
 
 
-CardAction::CardAction(std::weak_ptr<Character> actor, const std::string& animation) : 
-  actor(actor),
+CardAction::CardAction(std::weak_ptr<Character> user, const std::string& animation) : 
+  actor(user),
   animation(animation), 
-  anim(actor.lock()->GetFirstComponent<AnimationComponent>()),
+  anim(user.lock()->GetFirstComponent<AnimationComponent>()),
   uuid(), 
   prevState(), 
   attachments(),
@@ -33,7 +33,7 @@ CardAction::CardAction(std::weak_ptr<Character> actor, const std::string& animat
 {
   if (anim) {
     prepareActionDelegate = [this] {
-      auto actor = this->GetActor();
+      std::shared_ptr<Character> actor = this->GetActor();
 
       if (!actor) {
         return;
@@ -107,13 +107,13 @@ void CardAction::AddAnimAction(int frame, const FrameCallback& action) {
 }
 
 sf::Vector2f CardAction::CalculatePointOffset(const std::string& point) {
-  if (!this->anim) {
-    if (auto actor = GetActor()) {
+  if (!anim) {
+    if (std::shared_ptr<Character> actor = GetActor()) {
       Logger::Logf(LogLevel::warning, "Character %s must have an animation component", actor->GetName().c_str());
     }
   }
 
-  return this->anim->GetPoint(point) - this->anim->GetPoint("origin");
+  return anim->GetPoint(point) - anim->GetPoint("origin");
 }
 
 void CardAction::RecallPreviousState()
@@ -154,7 +154,7 @@ void CardAction::OverrideAnimationFrames(std::list<OverrideFrame> frameData)
 {
   if (anim) {
     prepareActionDelegate = [this, frameData]() {
-      auto actor = this->GetActor();
+      std::shared_ptr<Character> actor = this->GetActor();
 
       if (!actor) {
         return;
@@ -232,12 +232,13 @@ void CardAction::EndAction()
   RecallPreviousState();
   OnActionEnd();
   
-  if (auto actorPtr = actor.lock()) {
-    actorPtr->GetTile()->RemoveEntityByID(actorPtr->GetID());
-    startTile->AddEntity(actorPtr);
+  if (std::shared_ptr<Character> actorPtr = actor.lock()) { 
+    if (actorPtr->GetTile()->RemoveEntityByID(actorPtr->GetID())) {
+      startTile->AddEntity(actorPtr);
+    }
   }
 
-  if (auto user = userWeak.lock()) {
+  if (std::shared_ptr<Character> user = userWeak.lock()) {
     // reset context
     Hit::Context context;
     context.aggressor = user->GetID();
@@ -250,25 +251,25 @@ void CardAction::UseStuntDouble(std::shared_ptr<Character> stuntDouble)
 {
   actor = stuntDouble;
   
-  if (auto stuntDoubleAnim = stuntDouble->GetFirstComponent<AnimationComponent>()) {
+  if (std::shared_ptr<AnimationComponent> stuntDoubleAnim = stuntDouble->GetFirstComponent<AnimationComponent>()) {
     for (auto& [nodeName, node] : attachments) {
       node.parentAnim = stuntDoubleAnim->GetAnimationObject();
     }
 
-    this->anim = stuntDoubleAnim;
+    anim = stuntDoubleAnim;
   }
 }
 
 CardAction::Attachment& CardAction::AddAttachment(const std::string& point) {
-  auto actor = this->GetActor();
+  std::shared_ptr<Character> actor = GetActor();
 
   if (!actor) {
     throw std::runtime_error("Owner was deleted");
   }
 
-  auto animComp = actor->GetFirstComponent<AnimationComponent>();
+  std::shared_ptr<AnimationComponent> animComp = actor->GetFirstComponent<AnimationComponent>();
   assert(animComp && "owner must have an animation component");
-  auto& anim = animComp->GetAnimationObject();
+  Animation& anim = animComp->GetAnimationObject();
 
   auto iter = attachments.insert(std::make_pair(point, Attachment{ anim, point }));
 
@@ -284,7 +285,7 @@ CardAction::Attachment& CardAction::AddAttachment(const std::string& point) {
 
 void CardAction::Update(double _elapsed)
 {
-  auto actor = GetActor();
+  std::shared_ptr<Character> actor = GetActor();
 
   if (!actor) {
     return;
@@ -295,8 +296,8 @@ void CardAction::Update(double _elapsed)
     node.Update(_elapsed);
 
     // update the node's position
-    auto baseOffset = node.GetParentAnim().GetPoint(nodeName);
-    const auto& origin = actor->getSprite().getOrigin();
+    sf::Vector2f baseOffset = node.GetParentAnim().GetPoint(nodeName);
+    const sf::Vector2f& origin = actor->getSprite().getOrigin();
     baseOffset = baseOffset - origin;
 
     node.SetOffset(baseOffset);
@@ -330,7 +331,7 @@ void CardAction::PreventCounters()
 
 void CardAction::SetLockout(const CardAction::LockoutProperties& props)
 {
-  this->lockoutProps = props;
+  lockoutProps = props;
 }
 
 void CardAction::SetLockoutGroup(const CardAction::LockoutGroup& group)
@@ -339,7 +340,7 @@ void CardAction::SetLockoutGroup(const CardAction::LockoutGroup& group)
 }
 
 void CardAction::FreeAttachedNodes() {
-  if (auto actor = GetActor()) {
+  if (std::shared_ptr<Character> actor = GetActor()) {
     for (auto& [nodeName, node] : attachments) {
       actor->RemoveNode(node.spriteProxy.get());
     }
@@ -360,7 +361,7 @@ const CardAction::LockoutType CardAction::GetLockoutType() const
 
 const std::string& CardAction::GetAnimState() const
 {
-  return this->animation;
+  return animation;
 }
 
 const bool CardAction::IsAnimationOver() const
@@ -408,8 +409,8 @@ void CardAction::Attachment::Update(double elapsed)
     node.Update(elapsed);
 
     // update the node's position
-    auto baseOffset = node.GetParentAnim().GetPoint(nodeName);
-    const auto& origin = spriteProxy->getSprite().getOrigin();
+    sf::Vector2f baseOffset = node.GetParentAnim().GetPoint(nodeName);
+    const sf::Vector2f& origin = spriteProxy->getSprite().getOrigin();
     baseOffset = baseOffset - origin;
 
     node.SetOffset(baseOffset);
@@ -418,18 +419,18 @@ void CardAction::Attachment::Update(double elapsed)
 
 void CardAction::Attachment::SetOffset(const sf::Vector2f& pos)
 {
-  this->spriteProxy->setPosition(pos);
+  spriteProxy->setPosition(pos);
 }
 
 void CardAction::Attachment::SetScale(const sf::Vector2f& scale)
 {
-  this->spriteProxy->setScale(scale);
+  spriteProxy->setScale(scale);
 }
 
 void CardAction::Attachment::AttachAllPendingNodes()
 {
   for (auto& [nodeName, node] : attachments) {
-    this->spriteProxy->AddNode(node.spriteProxy);
+    spriteProxy->AddNode(node.spriteProxy);
   }
 
   started = true;
@@ -437,14 +438,14 @@ void CardAction::Attachment::AttachAllPendingNodes()
 
 Animation& CardAction::Attachment::GetParentAnim()
 {
-  return this->parentAnim;
+  return parentAnim;
 }
 
 CardAction::Attachment& CardAction::Attachment::AddAttachment(const std::string& point) {
   auto iter = attachments.insert(std::make_pair(point, Attachment(animation, point)));
 
   if (started) {
-    this->spriteProxy->AddNode(iter->second.spriteProxy);
+    spriteProxy->AddNode(iter->second.spriteProxy);
 
     // inform any new attachments they can and should attach immediately
     iter->second.started = true;

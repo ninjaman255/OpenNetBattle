@@ -9,9 +9,6 @@
 
 void DefineScriptedCharacterUserType(ScriptResourceManager* scriptManager, const std::string& namespaceId, sol::state& state, sol::table& battle_namespace) {
   auto from = [state = &state] (std::shared_ptr<Entity> entity) {
-    if (auto character = std::dynamic_pointer_cast<ScriptedCharacter>(entity)) {
-      return sol::make_object(*state, WeakWrapper(character));
-    }
     if (auto character = std::dynamic_pointer_cast<Character>(entity)) {
       if (!dynamic_cast<Obstacle*>(entity.get())) {
         return sol::make_object(*state, WeakWrapper(character));
@@ -63,7 +60,7 @@ void DefineScriptedCharacterUserType(ScriptResourceManager* scriptManager, const
       character->InitFromScript(*scriptPackage->state);
       character->CreateComponent<MobHealthUI>(character);
 
-      auto wrappedCharacter = WeakWrapper(character);
+      auto wrappedCharacter = WeakWrapper(std::static_pointer_cast<Character>(character));
       wrappedCharacter.Own();
       return wrappedCharacter;
     },
@@ -87,6 +84,10 @@ void DefineScriptedCharacterUserType(ScriptResourceManager* scriptManager, const
         character.Unwrap()->AddAction(CardEvent{ cardAction.UnwrapAndRelease() }, order);
       }
     ),
+    "can_attack", [](WeakWrapper<ScriptedCharacter>& character) {
+      auto characterPtr = character.Unwrap();
+      return characterPtr->CanAttack();
+    },
     "get_rank", [](WeakWrapper<ScriptedCharacter>& character) -> Character::Rank {
       return character.Unwrap()->GetRank();
     },
@@ -129,7 +130,7 @@ void DefineScriptedCharacterUserType(ScriptResourceManager* scriptManager, const
         character.Unwrap()->can_move_to_func = VerifyLuaCallback(value);
       }
     ),
-    "on_countered", sol::property(
+    "on_countered_func", sol::property(
       [](WeakWrapper<ScriptedCharacter>& character) { return character.Unwrap()->on_countered_func; },
       [](WeakWrapper<ScriptedCharacter>& character, sol::stack_object value) {
         character.Unwrap()->on_countered_func = VerifyLuaCallback(value);

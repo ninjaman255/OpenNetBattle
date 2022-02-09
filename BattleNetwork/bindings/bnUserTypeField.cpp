@@ -14,15 +14,21 @@
 static sol::as_table_t<std::vector<WeakWrapper<Character>>> FindNearestCharacters(WeakWrapper<Field>& field, std::shared_ptr<Entity> test, sol::stack_object queryObject) {
   sol::protected_function query = queryObject;
 
-  // store entities in a temp to avoid issues if the scripter mutates entities in this loop
-  std::vector<WeakWrapper<Character>> characters;
-
-  field.Unwrap()->FindNearestCharacters(test, [&characters] (std::shared_ptr<Character>& character) -> bool {
-    characters.push_back(WeakWrapper(character));
-    return false;
+  // prevent mutating during loop by getting a copy of the characters sorted first, not expecting many characters to be on the field anyway
+  // alternative is collecting into a weak wrapper list, filtering, converting to a shared_ptr list, sorting, converting to a weak wrapper list
+  std::vector<std::shared_ptr<Character>> characters = field.Unwrap()->FindNearestCharacters(test, [&characters] (std::shared_ptr<Character>& character) -> bool {
+    return true;
   });
 
-  return FilterEntities(characters, queryObject);
+  // convert to weak wrapper
+  std::vector<WeakWrapper<Character>> wrappedCharacters;
+
+  for (auto& character : characters) {
+    wrappedCharacters.push_back(WeakWrapper(character));
+  }
+
+  // filter the sorted list
+  return FilterEntities(wrappedCharacters, queryObject);
 }
 
 void DefineFieldUserType(sol::table& battle_namespace) {
@@ -90,9 +96,10 @@ void DefineFieldUserType(sol::table& battle_namespace) {
       // store entities in a temp to avoid issues if the scripter mutates entities in this loop
       std::vector<WeakWrapper<Entity>> entities;
 
-      field.Unwrap()->FindEntities([&entities](std::shared_ptr<Entity>& entity) -> bool {
-        entities.push_back(WeakWrapper(entity));
-        return false;
+      field.Unwrap()->ForEachEntity([&entities](std::shared_ptr<Entity>& entity) {
+        if (entity->IsHitboxAvailable()) {
+          entities.push_back(WeakWrapper(entity));
+        }
       });
 
       return FilterEntities(entities, queryObject);
@@ -104,9 +111,10 @@ void DefineFieldUserType(sol::table& battle_namespace) {
       // store entities in a temp to avoid issues if the scripter mutates entities in this loop
       std::vector<WeakWrapper<Character>> characters;
 
-      field.Unwrap()->FindCharacters([&characters](std::shared_ptr<Character>& character) -> bool {
-        characters.push_back(WeakWrapper(character));
-        return false;
+      field.Unwrap()->ForEachCharacter([&characters](std::shared_ptr<Character>& character) {
+        if (character->IsHitboxAvailable()) {
+          characters.push_back(WeakWrapper(character));
+        }
       });
 
       return FilterEntities(characters, queryObject);
@@ -118,9 +126,10 @@ void DefineFieldUserType(sol::table& battle_namespace) {
       // store entities in a temp to avoid issues if the scripter mutates entities in this loop
       std::vector<WeakWrapper<Obstacle>> obstacles;
 
-      field.Unwrap()->FindObstacles([&obstacles](std::shared_ptr<Obstacle>& obstacle) -> bool {
-        obstacles.push_back(WeakWrapper(obstacle));
-        return false;
+      field.Unwrap()->ForEachObstacle([&obstacles](std::shared_ptr<Obstacle>& obstacle) {
+        if (obstacle->IsHitboxAvailable()) {
+          obstacles.push_back(WeakWrapper(obstacle));
+        }
       });
 
       return FilterEntities(obstacles, queryObject);
@@ -178,6 +187,7 @@ void DefineFieldUserType(sol::table& battle_namespace) {
       Entity::ID_t observer,
       sol::object callbackObject
     ) -> Field::NotifyID_t {
+      ExpectLuaFunction(callbackObject);
 
       return field.Unwrap()->NotifyOnDelete(
         target,
@@ -198,6 +208,8 @@ void DefineFieldUserType(sol::table& battle_namespace) {
       Entity::ID_t target,
       sol::object callbackObject
     ) -> Field::NotifyID_t {
+      ExpectLuaFunction(callbackObject);
+
       return field.Unwrap()->CallbackOnDelete(
         target,
         [callbackObject] (std::shared_ptr<Entity> e) {

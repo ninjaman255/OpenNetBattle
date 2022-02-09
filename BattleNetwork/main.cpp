@@ -77,25 +77,27 @@ int main(int argc, char** argv) {
   // Prevent throwing exceptions on bad input
   options.allow_unrecognised_options();
 
-  // Parse
-  cxxopts::ParseResult parsedOptions = options.parse(argc, argv);
+ try {
+    cxxopts::ParseResult parsedOptions = options.parse(argc, argv);
 
-  // Check for help, print, and quit early
-  if (parsedOptions.count("help")) {
-    std::cout << options.help() << std::endl;
-    return EXIT_SUCCESS;
-  }
+    // Check for help, print, and quit early
+    if (parsedOptions.count("help")) {
+      std::cout << options.help() << std::endl;
+      return EXIT_SUCCESS;
+    }
 
-  DrawWindow win;
-  win.Initialize("Open Net Battle v2.0a", DrawWindow::WindowMode::window);
-  Game game{ win };
+    DrawWindow win;
+    win.Initialize("Open Net Battle v2.0a", DrawWindow::WindowMode::window);
+    Game game{ win };
 
-  try {
     // Go the the title screen to kick off the rest of the app
     if (LaunchGame(game, parsedOptions) == EXIT_SUCCESS) {
       // blocking
       game.Run();
     }
+  }
+  catch (cxxopts::missing_argument_exception& e) {
+    Logger::Log(LogLevel::critical, e.what());
   }
   catch (std::exception& e) {
     Logger::Log(LogLevel::critical, e.what());
@@ -103,7 +105,6 @@ int main(int argc, char** argv) {
   catch (...) {
     Logger::Log(LogLevel::critical, "Game encountered an unknown exception. Aborting.");
   }
-  game.Exit();
 
   // finished
   return EXIT_SUCCESS;
@@ -143,7 +144,7 @@ void ParseErrorLevel(std::string in) {
     valid.clear();
     valid.push_back("all");
   }
-  
+
   std::string validStr = "silent";
 
   for (size_t i = 0; i < valid.size(); i++) {
@@ -156,7 +157,7 @@ void ParseErrorLevel(std::string in) {
 
   msg += "`" + validStr + "`";
   std::cerr << msg << std::endl;
-  
+
   Logger::SetLogLevel(level);
 }
 
@@ -219,7 +220,7 @@ int LaunchGame(Game& g, const cxxopts::ParseResult& results) {
     return EXIT_SUCCESS;
   }
 
-  // If single player game, the last screen the player will ever see 
+  // If single player game, the last screen the player will ever see
   // is the game over screen so it goes to the bottom of the stack
   // before the TitleSceene:
   // g.push<GameOverScene>(); // <-- uncomment
@@ -255,16 +256,16 @@ int HandleBattleOnly(Game& g, TaskGroup tasks, const std::string& playerpath, co
   // Play the pre battle rumble sound
   handle.Audio().Play(AudioType::PRE_BATTLE, AudioPriority::high);
 
-  // Stop music and go to battle screen 
+  // Stop music and go to battle screen
   handle.Audio().StopStream();
 
   auto field = std::make_shared<Field>(6, 3);
 
   // Get the navi we selected
   auto& playermeta = g.PlayerPackagePartitioner().GetPartition(Game::LocalPartition).FindPackageByID(playerpath);
-  const std::string& image = playermeta.GetMugshotTexturePath();
-  Animation mugshotAnim = Animation() << playermeta.GetMugshotAnimationPath();
-  const std::string& emotionsTexture = playermeta.GetEmotionsTexturePath();
+  const std::filesystem::path& image = playermeta.GetMugshotTexturePath();
+  Animation mugshotAnim = Animation(playermeta.GetMugshotAnimationPath());
+  const std::filesystem::path& emotionsTexture = playermeta.GetEmotionsTexturePath();
   auto mugshot = handle.Textures().LoadFromFile(image);
   auto emotions = handle.Textures().LoadFromFile(emotionsTexture);
   auto player = std::shared_ptr<Player>(playermeta.GetData());
@@ -322,7 +323,7 @@ stx::result_t<std::string> DownloadPackageFromURL(const std::string& url, Packag
     return stx::error<std::string>("Unable to download package. Result was HTTP_UNAUTHORIZED. Aborting.");
   }
 
-  std::string outpath = "cache/" + stx::rand_alphanum(12) + ".zip";
+  std::filesystem::path outpath = std::filesystem::path("cache") / std::filesystem::path(stx::rand_alphanum(12) + ".zip");
   std::ofstream ofs(outpath, std::fstream::binary);
   Poco::StreamCopier::copyStream(rs, ofs);
   ofs.close();
@@ -333,12 +334,12 @@ stx::result_t<std::string> DownloadPackageFromURL(const std::string& url, Packag
 std::unique_ptr<CardFolder> LoadFolderFromFile(const std::string& filePath, CardPackageManager& packageManager) {
   std::unique_ptr<CardFolder> folder = std::make_unique<CardFolder>();
   std::fstream file;
-  file.open(filePath, std::ios::in); 
+  file.open(filePath, std::ios::in);
   const char space = ' ';
 
   if (file.is_open()) {
     std::string line;
-    while (std::getline(file, line)) { 
+    while (std::getline(file, line)) {
       std::vector<std::string> tokens = stx::tokenize(line, space);
 
       if (tokens.size() < 2) {
@@ -460,7 +461,7 @@ void ReadPackageStep(PackageManagerT& pm, const std::string& path, std::string& 
   hash = pm.FindPackageByID(id).GetPackageFingerprint();
 }
 
-// NOTE: Game needs to instantiate before calling this function so 
+// NOTE: Game needs to instantiate before calling this function so
 //       that PackageManager's ResourceHandle variable will
 //       have a valid script manager ptr!
 void ReadPackageAndHash(const std::string& path, const std::string& modType) {

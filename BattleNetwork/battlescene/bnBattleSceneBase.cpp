@@ -24,11 +24,13 @@
 #include "../bnGraveyardBackground.h"
 #include "../bnVirusBackground.h"
 #include "../bnFadeInState.h"
+#include "../bnRandom.h"
 
 // Combos are counted if more than one enemy is hit within x frames
 // The game is clocked to display 60 frames per second
 // If x = 20 frames, then we want a combo hit threshold of 20/60 = 0.3 seconds
-#define COMBO_HIT_THRESHOLD_SECONDS 20.0f/60.0f
+#define COMBO_HIT_THRESHOLD_FRAMES frames(20)
+#define COUNTER_HIT_THRESHOLD_FRAMES frames(60)
 
 using swoosh::types::segue;
 using swoosh::Activity;
@@ -75,7 +77,7 @@ BattleSceneBase::BattleSceneBase(ActivityController& controller, BattleSceneBase
   background = props.background;
 
   if (!background) {
-    int randBG = rand() % 8;
+    int randBG = SyncedRand() % 8;
 
     if (randBG == 0) {
       background = std::make_shared<LanBackground>();
@@ -104,10 +106,10 @@ BattleSceneBase::BattleSceneBase(ActivityController& controller, BattleSceneBase
   }
 
   // Custom bar graphics
-  auto customBarTexture = Textures().LoadFromFile("resources/ui/custom.png");
+  std::shared_ptr<sf::Texture> customBarTexture = Textures().LoadFromFile(TexturePaths::CUST_GAUGE);
   customBar.setTexture(customBarTexture);
   customBar.setOrigin(customBar.getLocalBounds().width / 2, 0);
-  auto customBarPos = sf::Vector2f(240.f, 0.f);
+  sf::Vector2f customBarPos = sf::Vector2f(240.f, 0.f);
   customBar.setPosition(customBarPos);
   customBar.setScale(2.f, 2.f);
 
@@ -121,7 +123,7 @@ BattleSceneBase::BattleSceneBase(ActivityController& controller, BattleSceneBase
   Counter "reveal" ring
   */
 
-  counterRevealAnim = Animation("resources/navis/counter_reveal.animation");
+  counterRevealAnim = Animation(AnimationPaths::MISC_COUNTER_REVEAL);
   counterRevealAnim << "DEFAULT" << Animator::Mode::Loop;
 
   counterReveal = std::make_shared<SpriteProxyNode>();
@@ -172,15 +174,15 @@ BattleSceneBase::~BattleSceneBase() {
   // drop the camera from our event bus
   channel.Drop(&camera);
 
-  for (auto&& elem : states) {
-    delete elem;
+  for (BattleSceneState* statePtr : states) {
+    delete statePtr;
   }
 
-  for (auto&& elem : nodeToEdges) {
-    delete elem.second;
+  for (auto [statePtr, edgePtr] : nodeToEdges) {
+    delete edgePtr;
   }
 
-  for (auto& c : components) {
+  for (std::shared_ptr<Component>& c : components) {
     c->scene = nullptr;
   }
 }
@@ -205,37 +207,49 @@ const bool BattleSceneBase::IsSceneInFocus() const
 
 const bool BattleSceneBase::IsQuitting() const
 {
-    return this->quitting;
+  return quitting;
 }
 
 void BattleSceneBase::OnCounter(Entity& victim, Entity& aggressor)
 {
-  Audio().Play(AudioType::COUNTER, AudioPriority::highest);
+  for (std::shared_ptr<Player> p : GetAllPlayers()) {
+    if (&aggressor != p.get()) continue;
 
-  if (&aggressor == localPlayer.get()) {
-    totalCounterMoves++;
+    if (p == localPlayer) {
+      didCounterHit = true; // This flag allows the counter to display
+      comboInfoTimer.reset(); // reset display timer
+      totalCounterMoves++;
 
-    if (victim.IsDeleted()) {
-      totalCounterDeletions++;
+      if (victim.IsDeleted()) {
+        totalCounterDeletions++;
+      }
     }
 
-    didCounterHit = true;
-    comboInfoTimer.reset();
+    Audio().Play(AudioType::COUNTER, AudioPriority::highest);
 
-    if (localPlayer->IsInForm() == false && localPlayer->GetEmotion() != Emotion::evil) {
-      field->RevealCounterFrames(true);
+    victim.ToggleCounter(false); // disable counter frame for the victim
+    victim.Stun(frames(150));
+
+    if (p->IsInForm() == false && p->GetEmotion() != Emotion::evil) {
+      if (p == localPlayer) {
+        field->RevealCounterFrames(true);
+      }
 
       // node positions are relative to the parent node's origin
-      auto bounds = localPlayer->getLocalBounds();
+      sf::FloatRect bounds = p->getLocalBounds();
       counterReveal->setPosition(0, -bounds.height / 4.0f);
-      localPlayer->AddNode(counterReveal);
+      p->AddNode(counterReveal);
 
-      cardUI->SetMultiplier(2);
+      std::shared_ptr<PlayerSelectedCardsUI> cardUI = p->GetFirstComponent<PlayerSelectedCardsUI>();
 
-      localPlayer->SetEmotion(Emotion::full_synchro);
+      if (cardUI) {
+        cardUI->SetMultiplier(2);
+      }
+
+      p->SetEmotion(Emotion::full_synchro);
 
       // when players get hit by impact, battle scene takes back counter blessings
-      localPlayer->AddDefenseRule(counterCombatRule);
+      p->AddDefenseRule(counterCombatRule);
     }
   }
 }
@@ -245,7 +259,7 @@ void BattleSceneBase::OnSpawnEvent(std::shared_ptr<Character>& spawned)
   if (spawned->GetTeam() == Team::red) {
     redTeamMob->Track(spawned);
   }
-  else {
+  else if(spawned->GetTeam() == Team::blue) {
     blueTeamMob->Track(spawned);
   }
 }
@@ -258,10 +272,10 @@ void BattleSceneBase::OnDeleteEvent(Character& pending)
     isPlayerDeleted = true;
   }
 
-  auto pendingPtr = &pending;
+  Character* pendingPtr = &pending;
 
   // Find any AI using this character as a target and free that pointer  
-  field->FindEntities([pendingPtr](std::shared_ptr<Entity>& in) {
+  field->ForEachEntity([pendingPtr](std::shared_ptr<Entity>& in) {
     Agent* agent = dynamic_cast<Agent*>(in.get());
 
     if (agent && agent->GetTarget().get() == pendingPtr) {
@@ -278,11 +292,13 @@ void BattleSceneBase::OnDeleteEvent(Character& pending)
   if (redTeamMob) {
     redTeamMob->Forget(pending);
     redTeamClear = redTeamMob->IsCleared();
+    deletingRedMobs.push_back(pending.GetID());
   }
 
   if (blueTeamMob) {
     blueTeamMob->Forget(pending);
     blueTeamClear = blueTeamMob->IsCleared();
+    deletingBlueMobs.push_back(pending.GetID());
   }
 
   if (redTeamClear || blueTeamClear) {
@@ -297,12 +313,12 @@ const BattleSceneState* BattleSceneBase::GetCurrentState() const
 
 const int BattleSceneBase::ComboDeleteSize() const 
 {
-  return comboInfoTimer.getElapsed().asSeconds() <= 1.0f ? comboDeleteCounter : 0;
+  return comboInfoTimer.elapsed() <= COUNTER_HIT_THRESHOLD_FRAMES ? comboDeleteCounter : 0;
 }
 
 const bool BattleSceneBase::Countered() const
 {
-  return comboInfoTimer.getElapsed().asSeconds() <= 1.0f && didCounterHit;
+  return comboInfoTimer.elapsed() <= COUNTER_HIT_THRESHOLD_FRAMES && didCounterHit;
 }
 
 void BattleSceneBase::HighlightTiles(bool enable)
@@ -394,7 +410,9 @@ std::shared_ptr<Player> BattleSceneBase::GetPlayerFromEntityID(Entity::ID_t ID)
 
 void BattleSceneBase::OnCardActionUsed(std::shared_ptr<CardAction> action, uint64_t timestamp)
 {
-  HandleCounterLoss(*action->GetActor(), true);
+  if (action->GetMetaData().canBoost) {
+    HandleCounterLoss(*action->GetActor(), true);
+  }
 }
 
 sf::Vector2f BattleSceneBase::PerspectiveOffset(const sf::Vector2f& pos)
@@ -425,7 +443,9 @@ void BattleSceneBase::SpawnLocalPlayer(int x, int y)
   hasPlayerSpawned = true;
   Team team = field->GetAt(x, y)->GetTeam();
 
-  localPlayer->Init();
+  if (!localPlayer->HasInit()) {
+    localPlayer->Init();
+  }
   localPlayer->ChangeState<PlayerIdleState>();
   localPlayer->SetTeam(team);
   field->AddEntity(localPlayer, x, y);
@@ -464,7 +484,9 @@ void BattleSceneBase::SpawnOtherPlayer(std::shared_ptr<Player> player, int x, in
 
   Team team = field->GetAt(x, y)->GetTeam();
 
-  player->Init();
+  if (!player->HasInit()) {
+    player->Init();
+  }
   player->ChangeState<PlayerIdleState>();  
   player->SetTeam(team);
   field->AddEntity(player, x, y);
@@ -517,7 +539,7 @@ void BattleSceneBase::HandleCounterLoss(Entity& subject, bool playsound)
   }
 }
 
-void BattleSceneBase::FilterSupportCards(std::vector<Battle::Card>& cards) {
+void BattleSceneBase::FilterSupportCards(const std::shared_ptr<Player>& player, std::vector<Battle::Card>& cards) {
   CardPackagePartitioner& partitions = getController().CardPackagePartitioner();
 
   for (size_t i = 0; i < cards.size(); i++) {
@@ -531,7 +553,7 @@ void BattleSceneBase::FilterSupportCards(std::vector<Battle::Card>& cards) {
         CardPackageManager& cardPackageManager = partitions.GetPartition(addr.namespaceId);
 
         // booster cards do not modify other booster cards
-        if (cardPackageManager.HasPackage(uuid)) {
+        if (cardPackageManager.HasPackage(addr.packageId)) {
           AdjacentCards adjCards;
 
           if (i > 0 && cards[i - 1u].CanBoost()) {
@@ -544,7 +566,7 @@ void BattleSceneBase::FilterSupportCards(std::vector<Battle::Card>& cards) {
             adjCards.rightCard = &cards[i + 1u].props;
           }
 
-          auto& meta = cardPackageManager.FindPackageByID(uuid);
+          CardMeta& meta = cardPackageManager.FindPackageByID(addr.packageId);
 
           if (meta.filterHandStep) {
             meta.filterHandStep(cards[i].props, adjCards);
@@ -603,11 +625,13 @@ void BattleSceneBase::StartStateGraph(StateNode& start) {
     }
   }
 
+  PerspectiveFlip(localPlayer->GetTeam() == Team::blue);
+
   field->Update(0);
 
   // set the current state ptr and kick-off
-  this->current = &start.state;
-  this->current->onStart();
+  current = &start.state;
+  current->onStart();
 }
 
 void BattleSceneBase::onStart()
@@ -638,8 +662,25 @@ void BattleSceneBase::onUpdate(double elapsed) {
     }
   }
 
-  camera.Update((float)elapsed);
   background->Update((float)elapsed);
+
+  if (Input().GetAnyKey() == sf::Keyboard::Escape && this->IsSceneInFocus()) {
+    BroadcastBattleStop();
+    Quit(FadeOut::white);
+    Audio().StopStream();
+  }
+
+  // State update
+  if (!current) return;
+
+  if (skipFrame) {
+    skipFrame = false;
+    return;
+  }
+
+  IncrementFrame();
+
+  camera.Update((float)elapsed);
 
   if (backdropShader) {
     backdropShader->setUniform("opacity", (float)backdropOpacity);
@@ -669,15 +710,6 @@ void BattleSceneBase::onUpdate(double elapsed) {
   newRedTeamMobSize = redTeamMob ? redTeamMob->GetMobCount() : 0;
   newBlueTeamMobSize = blueTeamMob ? blueTeamMob->GetMobCount() : 0;
 
-  if (sf::Keyboard::isKeyPressed(sf::Keyboard::Escape) && this->IsSceneInFocus()) {
-    BroadcastBattleStop();
-    Quit(FadeOut::white);
-    Audio().StopStream();
-  }
-
-  // State update
-  if(!current) return;
-
   current->onUpdate(elapsed);
 
   if (customProgress / customDuration >= 1.0 && !isGaugeFull) {
@@ -685,7 +717,7 @@ void BattleSceneBase::onUpdate(double elapsed) {
     Audio().Play(AudioType::CUSTOM_BAR_FULL);
   }
 
-  auto componentsCopy = components;
+  std::vector<std::shared_ptr<Component>> componentsCopy = components;
 
   // Update components
   for (std::shared_ptr<Component>& c : componentsCopy) {
@@ -696,7 +728,7 @@ void BattleSceneBase::onUpdate(double elapsed) {
       // If the mob isn't cleared, only update when the battle-step timer is going
       // Otherwise, feel free to update as the battle is over (mob is cleared)
       bool isCleared = (redTeamMob && redTeamMob->IsCleared()) || (blueTeamMob && blueTeamMob->IsCleared());
-      bool updateBattleSteps = !isCleared && !battleTimer.isPaused();
+      bool updateBattleSteps = !isCleared && !battleTimer.is_paused();
       updateBattleSteps = updateBattleSteps || isCleared;
       if (updateBattleSteps) {
         c->Update((float)elapsed);
@@ -705,31 +737,39 @@ void BattleSceneBase::onUpdate(double elapsed) {
   }
 
   counterRevealAnim.Update((float)elapsed, counterReveal->getSprite());
-  comboInfoTimer.update(sf::seconds(static_cast<float>(elapsed)));
-  multiDeleteTimer.update(sf::seconds(static_cast<float>(elapsed)));
-  battleTimer.update(sf::seconds(static_cast<float>(elapsed)));
+
+  if (!battleTimer.is_paused()) {
+    comboInfoTimer.tick();
+    multiDeleteTimer.tick();
+
+    if (comboInfoTimer.elapsed() > COUNTER_HIT_THRESHOLD_FRAMES) {
+      didCounterHit = didDoubleDelete = didTripleDelete = false;
+    }
+  }
+
+  battleTimer.tick();
 
   // Track combo deletes
   const int& lastMobSize = localPlayer->GetTeam() == Team::red ? blueTeamMob->GetMobCount() : redTeamMob->GetMobCount();
   int& newMobSize = localPlayer->GetTeam() == Team::red ? newBlueTeamMobSize : newRedTeamMobSize;
 
   if (lastMobSize != newMobSize && !isPlayerDeleted) {
-    int counter = lastMobSize - newMobSize;
-    if (multiDeleteTimer.getElapsed() <= sf::seconds(COMBO_HIT_THRESHOLD_SECONDS)) {
+    int counter = newMobSize - lastMobSize; // this frame's mob size - mob size after 1 frame of update = combo delete count
+    if (multiDeleteTimer.elapsed() <= COMBO_HIT_THRESHOLD_FRAMES) {
       comboDeleteCounter += counter;
 
       if (comboDeleteCounter == 2) {
         didDoubleDelete = true;
-        comboInfoTimer.reset();
       }
       else if (comboDeleteCounter > 2) {
         didTripleDelete = true;
-        comboInfoTimer.reset();
       }
     }
-    else if (multiDeleteTimer.getElapsed() > sf::seconds(COMBO_HIT_THRESHOLD_SECONDS)) {
+    else if (multiDeleteTimer.elapsed() > COMBO_HIT_THRESHOLD_FRAMES) {
       comboDeleteCounter = counter;
     }
+
+    comboInfoTimer.reset();
   }
 
   if (lastMobSize != newMobSize) {
@@ -743,7 +783,9 @@ void BattleSceneBase::onUpdate(double elapsed) {
   for (auto iter = nodeToEdges.begin(); iter != nodeToEdges.end(); iter++) {
     if (iter->first == current) {
       if (iter->second->when()) {
-        auto temp = iter->second->b;
+        Logger::Logf(LogLevel::debug, "Changing BattleSceneState on frame %d", FrameNumber());
+
+        BattleSceneState* temp = iter->second->b;
         this->last = current;
         this->next = temp;
         current->onEnd(this->next);
@@ -753,6 +795,29 @@ void BattleSceneBase::onUpdate(double elapsed) {
         break;
       }
     }
+  }
+
+  // cleanup trackers for ex-mob enemies when they are fully removed from the field
+  // 
+  // red team mobs
+  for (auto iter = deletingRedMobs.begin(); iter != deletingRedMobs.end(); /*skip*/) {
+    if (!field->GetEntity(*iter)) {
+      iter = deletingRedMobs.erase(iter);
+      continue;
+    }
+
+    iter++;
+  }
+
+  //
+  // blue team mobs
+  for (auto iter = deletingBlueMobs.begin(); iter != deletingBlueMobs.end(); /*skip*/) {
+    if (!field->GetEntity(*iter)) {
+      iter = deletingBlueMobs.erase(iter);
+      continue;
+    }
+
+    iter++;
   }
 
   if (localPlayer) {
@@ -809,7 +874,6 @@ void BattleSceneBase::onDraw(sf::RenderTexture& surface) {
     if (tile->IsEdgeTile()) continue;
 
     bool yellowBlock = false;
-
     bool isCleared = (redTeamMob && redTeamMob->IsCleared()) || (blueTeamMob && blueTeamMob->IsCleared());
     if (tile->IsHighlighted() && !isCleared) {
       if (!yellowShader) {
@@ -849,7 +913,7 @@ void BattleSceneBase::onDraw(sf::RenderTexture& surface) {
 
   for (Battle::Tile* tile : allTiles) {
     std::vector<Entity*> tileEntities;
-    tile->FindEntities([&tileEntities, &allEntities](std::shared_ptr<Entity>& ent) {
+    tile->ForEachEntity([&tileEntities, &allEntities](std::shared_ptr<Entity>& ent) {
       tileEntities.push_back(ent.get());
       allEntities.push_back(ent.get());
       return false;
@@ -864,12 +928,18 @@ void BattleSceneBase::onDraw(sf::RenderTexture& surface) {
 
       sf::Vector2f ogScale = node->getScale();
 
-      if (perspectiveFlip) {
+      if (perspectiveFlip && !node->neverFlip) {
         node->setScale(-ogScale.x, ogScale.y);
       }
 
       node->ShiftShadow();
-      surface.draw(*node);
+
+      // TODO: having the field use hashes to identify entity types purely by ID would be faster
+      //       and remove all dynamic casting in the engine...
+      bool isSpell = (dynamic_cast<Spell*>(node) != nullptr);
+      if (isSpell || localPlayer->Teammate(node->GetTeam()) || !localPlayer->IsBlind()) {
+        surface.draw(*node);
+      }
 
       if (perspectiveFlip) {
         node->setScale(ogScale.x, ogScale.y);
@@ -883,6 +953,9 @@ void BattleSceneBase::onDraw(sf::RenderTexture& surface) {
 
   // draw ui on top
   for (Entity* ent : allEntities) {
+    // skip this entity's UI components if player is blinded
+    if (!(localPlayer->Teammate(ent->GetTeam()) || !localPlayer->IsBlind())) continue;
+
     std::vector<std::shared_ptr<UIComponent>> uis = ent->GetComponentsDerivedFrom<UIComponent>();
     sf::Vector2f flipOffset = PerspectiveOffset(ent->getPosition());
     for (std::shared_ptr<UIComponent>& ui : uis) {
@@ -919,12 +992,12 @@ void BattleSceneBase::onDraw(sf::RenderTexture& surface) {
 
 void BattleSceneBase::onEnd()
 {
-  if (this->onEndCallback) {
-    this->onEndCallback(battleResults);
+  if (onEndCallback) {
+    onEndCallback(battleResults);
   }
 }
 
-bool BattleSceneBase::TrackOtherPlayer(std::shared_ptr<Player> other) {
+bool BattleSceneBase::TrackOtherPlayer(std::shared_ptr<Player>& other) {
   if (other == localPlayer) return false; // prevent tracking local player as "other" players
 
   auto iter = std::find(otherPlayers.begin(), otherPlayers.end(), other);
@@ -937,7 +1010,7 @@ bool BattleSceneBase::TrackOtherPlayer(std::shared_ptr<Player> other) {
   return false;
 }
 
-void BattleSceneBase::UntrackOtherPlayer(std::shared_ptr<Player> other) {
+void BattleSceneBase::UntrackOtherPlayer(std::shared_ptr<Player>& other) {
   auto iter = std::find(otherPlayers.begin(), otherPlayers.end(), other);
   auto iter2 = allPlayerFormsHash.find(other.get());
   auto iter3 = allPlayerTeamHash.find(other.get());
@@ -946,6 +1019,12 @@ void BattleSceneBase::UntrackOtherPlayer(std::shared_ptr<Player> other) {
     allPlayerFormsHash.erase(iter2);
     allPlayerTeamHash.erase(iter3);
   }
+}
+
+void BattleSceneBase::UntrackMobCharacter(std::shared_ptr<Character>& character)
+{
+  redTeamMob->Forget(*character.get());
+  blueTeamMob->Forget(*character.get());
 }
 
 void BattleSceneBase::DrawWithPerspective(sf::Shape& shape, sf::RenderTarget& surf)
@@ -1007,6 +1086,10 @@ bool BattleSceneBase::IsPlayerDeleted() const
 }
 
 std::shared_ptr<Player> BattleSceneBase::GetLocalPlayer() {
+  return localPlayer;
+}
+
+const std::shared_ptr<Player> BattleSceneBase::GetLocalPlayer() const {
   return localPlayer;
 }
 
@@ -1072,7 +1155,7 @@ const int BattleSceneBase::GetRoundCount()
   return round;
 }
 
-const unsigned int BattleSceneBase::FrameNumber() const
+const frame_time_t BattleSceneBase::FrameNumber() const
 {
   return frameNumber;
 }
@@ -1107,13 +1190,18 @@ void BattleSceneBase::IncrementRoundCount()
   round++;
 }
 
+void BattleSceneBase::SkipFrame()
+{
+  skipFrame = true;
+}
+
 void BattleSceneBase::IncrementFrame()
 {
   frameNumber++;
 }
 
-const sf::Time BattleSceneBase::GetElapsedBattleTime() {
-  return battleTimer.getElapsed();
+const frame_time_t BattleSceneBase::GetElapsedBattleFrames() {
+  return battleTimer.elapsed();
 }
 
 const bool BattleSceneBase::FadeInBackdrop(double amount, double to, bool affectBackground)
@@ -1203,7 +1291,7 @@ void BattleSceneBase::Inject(std::shared_ptr<MobHealthUI> other)
 
 void BattleSceneBase::Inject(std::shared_ptr<SelectedCardsUI> cardUI)
 {
-  this->SubscribeToCardActions(*cardUI);
+  SubscribeToCardActions(*cardUI);
 }
 
 // Default case: no special injection found for the type, just add it to our update loop
@@ -1211,7 +1299,7 @@ void BattleSceneBase::Inject(std::shared_ptr<Component> other)
 {
   assert(other && "Component injected was nullptr");
 
-  auto node = std::dynamic_pointer_cast<SceneNode>(other);
+  std::shared_ptr<SceneNode> node = std::dynamic_pointer_cast<SceneNode>(other);
   if (node) { scenenodes.push_back(node); }
 
   other->scene = this;
@@ -1221,16 +1309,16 @@ void BattleSceneBase::Inject(std::shared_ptr<Component> other)
 void BattleSceneBase::Eject(Component::ID_t ID)
 {
   auto iter = std::find_if(components.begin(), components.end(), 
-    [ID](auto& in) { return in->GetID() == ID; }
+    [ID](std::shared_ptr<Component>& in) { return in->GetID() == ID; }
   );
 
   if (iter != components.end()) {
-    auto& component = **iter;
+    Component& component = **iter;
 
-    auto node = dynamic_cast<SceneNode*>(&component);
+    SceneNode* node = dynamic_cast<SceneNode*>(&component);
     // TODO: dynamic casting could be entirely avoided by hashing IDs
     auto iter2 = std::find_if(scenenodes.begin(), scenenodes.end(), 
-      [node](auto& in) { 
+      [node](std::shared_ptr<SceneNode>& in) { 
         return in.get() == node;
       }
     );
@@ -1256,12 +1344,12 @@ void BattleSceneBase::TrackCharacter(std::shared_ptr<Character> newCharacter)
 
 const bool BattleSceneBase::IsRedTeamCleared() const
 {
-  return redTeamMob? redTeamMob->IsCleared() : true;
+  return redTeamMob? redTeamMob->IsCleared() && deletingRedMobs.empty() : true;
 }
 
 const bool BattleSceneBase::IsBlueTeamCleared() const
 {
-  return blueTeamMob ? blueTeamMob->IsCleared() : true;
+  return blueTeamMob ? blueTeamMob->IsCleared() && deletingBlueMobs.empty() : true;
 }
 
 void BattleSceneBase::Link(StateNode& a, StateNode& b, ChangeCondition when) {
@@ -1273,7 +1361,7 @@ void BattleSceneBase::ProcessNewestComponents()
 {
   // effectively returns all of them
   std::vector<Entity*> entities;
-  field->FindEntities([&entities](std::shared_ptr<Entity>& e) {
+  field->ForEachEntity([&entities](std::shared_ptr<Entity>& e) {
     entities.push_back(e.get());
     return false;
   });
@@ -1314,7 +1402,7 @@ void BattleSceneBase::FlushLocalPlayerInputQueue()
   queuedLocalEvents.clear();
 }
 
-std::vector<InputEvent> BattleSceneBase::ProcessLocalPlayerInputQueue(const frame_time_t& lag)
+std::vector<InputEvent> BattleSceneBase::ProcessLocalPlayerInputQueue(unsigned int lag, bool gatherInput)
 {
   std::vector<InputEvent> outEvents;
 
@@ -1322,27 +1410,34 @@ std::vector<InputEvent> BattleSceneBase::ProcessLocalPlayerInputQueue(const fram
 
   // For all inputs in the queue, reduce their wait time for this new frame
   for (InputEvent& item : queuedLocalEvents) {
-    item.wait -= from_seconds(elapsed);
+    item.wait--;
   }
 
-  // For all new input events, set the wait time based on the network latency and append
-  const auto events_this_frame = Input().StateThisFrame();
+  if (gatherInput) {
+    // For all new input events, set the wait time based on the network latency and append
+    const auto events_this_frame = Input().StateThisFrame();
 
-  for (auto& [name, state] : events_this_frame) {
-    InputEvent copy;
-    copy.name = name;
-    copy.state = state;
+    for (auto& [name, state] : events_this_frame) {
+      if (state != InputState::pressed && state != InputState::held) {
+        // let VirtualInputState resolve release
+        continue;
+      }
 
-    outEvents.push_back(copy);
+      InputEvent copy;
+      copy.name = name;
+      copy.state = InputState::pressed; // VirtualInputState will handle this
 
-    // add delay for network
-    copy.wait = lag;
-    queuedLocalEvents.push_back(copy);
+      outEvents.push_back(copy);
+
+      // add delay for network
+      copy.wait = lag;
+      queuedLocalEvents.push_back(copy);
+    }
   }
 
   // Drop inputs that are already processed at the end of the last frame
   for (auto iter = queuedLocalEvents.begin(); iter != queuedLocalEvents.end();) {
-    if (iter->wait <= frames(0)) {
+    if (iter->wait <= 0) {
       localPlayer->InputState().VirtualKeyEvent(*iter);
       iter = queuedLocalEvents.erase(iter);
       continue;

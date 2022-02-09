@@ -8,6 +8,7 @@
 #include "bnDrawWindow.h"
 #include "bnConfigReader.h"
 #include "bnConfigSettings.h"
+#include "bnFrameRecorder.h"
 #include "bnSpriteProxyNode.h"
 #include "bnAnimation.h"
 #include "bnNetManager.h"
@@ -62,13 +63,14 @@ private:
   double mouseAlpha{};
   bool showScreenBars{};
   bool frameByFrame{}, isDebug{}, quitting{ false };
-  bool singlethreaded{ false };
-  bool isRecording{}, isRecordOutSaving{}, recordPressed{};
+  bool singlethreaded{ false }, recordPressed{ false };
+
+  std::unique_ptr<FrameRecorder> frameRecorder;
 
   TextureResourceManager textureManager;
   AudioResourceManager audioManager;
   ShaderResourceManager shaderManager;
-#ifdef BN_MOD_SUPPORT 
+#ifdef BN_MOD_SUPPORT
   ScriptResourceManager scriptManager;
 #endif
   InputManager inputManager;
@@ -107,10 +109,9 @@ private:
   Endianness endian{ Endianness::big };
   std::vector<cxxopts::KeyValue> commandlineArgs; /*!< User-provided values from the command line*/
   cxxopts::ParseResult const* commandline{ nullptr }; /*!< Final values parsed from the command line configuration*/
-  std::vector<std::pair<unsigned, sf::Image>> recordedFrames;
   std::atomic<int> progress{ 0 };
   std::mutex windowMutex;
-  std::thread renderThread, recordOutThread;
+  std::thread renderThread;
 
   void HandleRecordingEvents();
   void UpdateMouse(double dt);
@@ -143,17 +144,18 @@ public:
   const unsigned int GetRandSeed() const;
   bool IsSingleThreaded() const;
   bool IsRecording() const;
-  void Record(bool enabled = true);
+  void StartRecording();
+  void StopRecording();
   void SetSubtitle(const std::string& subtitle);
 
-  const std::string AppDataPath();
-  const std::string CacheDataPath();
-  const std::string DesktopPath();
-  const std::string DownloadsPath();
-  const std::string DocumentsPath();
-  const std::string VideosPath();
-  const std::string PicturesPath();
-  const std::string SaveGamesPath();
+  const std::filesystem::path AppDataPath();
+  const std::filesystem::path CacheDataPath();
+  const std::filesystem::path DesktopPath();
+  const std::filesystem::path DownloadsPath();
+  const std::filesystem::path DocumentsPath();
+  const std::filesystem::path VideosPath();
+  const std::filesystem::path PicturesPath();
+  const std::filesystem::path SaveGamesPath();
 
   CardPackagePartitioner& CardPackagePartitioner();
   PlayerPackagePartitioner& PlayerPackagePartitioner();

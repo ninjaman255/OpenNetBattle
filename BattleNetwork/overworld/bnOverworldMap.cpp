@@ -20,7 +20,7 @@ namespace Overworld {
   void Map::Update(SceneBase& scene, double time) {
     for (auto& tileMeta : tileMetas) {
       if (tileMeta != nullptr) {
-        tileMeta->animation.SyncTime(time);
+        tileMeta->animation.SyncTime(from_seconds(time));
         tileMeta->animation.Refresh(tileMeta->sprite);
       }
     }
@@ -402,6 +402,10 @@ namespace Overworld {
   }
 
   bool Map::IgnoreTileAbove(float x, float y, int layerIndex) {
+    if (layerIndex < 0 || layerIndex >= layers.size()) {
+      return false;
+    }
+
     auto& layer = layers[layerIndex];
     auto tile = layer.GetTile(x, y);
 
@@ -422,6 +426,22 @@ namespace Overworld {
     return shadowMap.HasShadow(tilePos.x, tilePos.y, layer);
   }
 
+  bool Map::TileConceals(sf::Vector2i tilePos, int layer) {
+    if (layer < 0 || layer >= layers.size()) {
+      return false;
+    }
+
+    auto tile = layers[layer].GetTile(tilePos.x, tilePos.y);
+
+    if (!tile) {
+      return false;
+    }
+
+    auto tileMeta = GetTileMeta(tile->gid);
+
+    return tileMeta && tileMeta->type != TileType::invisible && !IgnoreTileAbove(tilePos.x, tilePos.y, layer - 1);
+  }
+
   bool Map::IsConcealed(sf::Vector2i tilePos, int layer) {
     auto col = tilePos.x;
     auto row = tilePos.y;
@@ -440,20 +460,12 @@ namespace Overworld {
         continue;
       }
 
-      auto& layer = layers[i];
-
-      if (layer.GetTile(col, row)->gid != 0) {
+      if (TileConceals({ col, row }, i)) {
         return true;
       }
 
-      if (isOddLayer) {
-        // need to check for nullptr
-        auto tile = layer.GetTile(col + 1, row + 1);
-
-        // odd layers have two tiles that may conceal us
-        if (tile && tile->gid != 0) {
-          return true;
-        }
+      if (isOddLayer && TileConceals({ col + 1, row + 1 }, i)) {
+        return true;
       }
     }
 

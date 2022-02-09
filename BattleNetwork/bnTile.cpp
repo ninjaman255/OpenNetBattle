@@ -202,6 +202,7 @@ namespace Battle {
 
   void Tile::PerspectiveFlip(bool state)
   {
+    isPerspectiveFlipped = state;
     if (state) {
       red_team_atlas = blue_team_perm;
       blue_team_atlas = red_team_perm;
@@ -228,7 +229,7 @@ namespace Battle {
 
     // Check if no characters on the opposing team are on this tile
     if (GetTeam() == Team::unknown || GetTeam() != _team) {
-      size_t size = FindEntities([this, _team](std::shared_ptr<Entity>& in) {
+      size_t size = FindHittableEntities([this, _team](std::shared_ptr<Entity>& in) {
         Character* isCharacter = dynamic_cast<Character*>(in.get());
         return isCharacter && in->GetTeam() != _team;
       }).size();
@@ -382,23 +383,12 @@ namespace Battle {
 
   bool Tile::IsReservedByCharacter(std::vector<Entity::ID_t> exclude)
   {
-    if (!reserved.empty()) return true;
-
-    if (exclude.size() == 0) {
-      return !characters.empty();
+    if (exclude.empty()) {
+      return !reserved.empty();
     }
 
-    for (std::shared_ptr<Character>& character: characters) {
-      bool excluded = false;
-
-      for (Entity::ID_t id : exclude) {
-        if (character->GetID() == id) {
-          excluded = true;
-          break;
-        }
-      }
-
-      if (!excluded) {
+    for (Entity::ID_t reserver_id : reserved) {
+      if (std::find(exclude.begin(), exclude.end(), reserver_id) == exclude.end()) {
         return true;
       }
     }
@@ -559,7 +549,7 @@ namespace Battle {
     }
 
     RefreshTexture();
-    animation.SyncTime(totalElapsed);
+    animation.SyncTime(from_seconds(totalElapsed));
     animation.Refresh(this->getSprite());
 
     switch (highlightMode) {
@@ -686,7 +676,7 @@ namespace Battle {
       if (!character.HasFloatShoe()) {
         if (GetState() == TileState::poison) {
           if (elapsedBurnTime <= 0) {
-            if (character.Hit(Hit::Properties({ 1, Hit::pierce, Element::none, 0, Direction::none }))) {
+            if (character.Hit(Hit::Properties({ 1, Hit::pierce, Element::none, Element::none, 0, Direction::none }))) {
               elapsedBurnTime = burncycle;
             }
           }
@@ -696,7 +686,9 @@ namespace Battle {
         }
 
         if (GetState() == TileState::lava) {
-          if (character.Hit(Hit::Properties({ 50, Hit::flash, Element::none, 0, Direction::none }))) {
+          Hit::Properties props = { 50, Hit::flash | Hit::flinch, Element::none, Element::none, 0, Direction::none };
+          if (character.HasCollision(props)) {
+            character.Hit(props);
             field.AddEntity(std::make_shared<Explosion>(), GetX(), GetY());
             SetState(TileState::normal);
           }
@@ -735,12 +727,49 @@ namespace Battle {
     }
   }
 
-  std::vector<std::shared_ptr<Entity>> Tile::FindEntities(std::function<bool(std::shared_ptr<Entity>& e)> query)
+  void Tile::ForEachEntity(const std::function<void(std::shared_ptr<Entity>& e)>& callback) {
+    for(auto iter = entities.begin(); iter != entities.end(); iter++ ) {
+      callback(*iter);
+    }
+  }
+
+  void Tile::ForEachCharacter(const std::function<void(std::shared_ptr<Character>& e)>& callback) {
+    for (auto iter = characters.begin(); iter != characters.end(); iter++) {
+      // skip obstacle types...
+      auto spell_iter = std::find_if(spells.begin(), spells.end(), [character = *iter](Entity* other) {
+        return other->GetID() == character->GetID();
+      });
+
+      if (spell_iter != spells.end()) continue;
+
+      callback(*iter);
+    }
+  }
+
+  void Tile::ForEachObstacle(const std::function<void(std::shared_ptr<Obstacle>& e)>& callback) {
+    
+    for (auto iter = characters.begin(); iter != characters.end(); iter++) {
+      // collect only obstacle types...
+      auto spell_iter = std::find_if(spells.begin(), spells.end(), [character = *iter](Entity* other) {
+        return other->GetID() == character->GetID();
+      });
+
+      if (spell_iter == spells.end()) continue;
+
+      std::shared_ptr<Obstacle> as_obstacle = std::dynamic_pointer_cast<Obstacle>(*iter);
+
+      if (as_obstacle) {
+        callback(as_obstacle);
+      }
+    }
+  }
+
+  std::vector<std::shared_ptr<Entity>> Tile::FindHittableEntities(std::function<bool(std::shared_ptr<Entity>& e)> query)
   {
     std::vector<std::shared_ptr<Entity>> res;
 
     for(auto iter = entities.begin(); iter != entities.end(); iter++ ) {
-      if (query(*iter) && (*iter)->IsHitboxAvailable()) {
+      if ((*iter)->IsHitboxAvailable() && query(*iter)) {
         res.push_back(*iter);
       }
     }
@@ -748,7 +777,7 @@ namespace Battle {
     return res;
   }
 
-  std::vector<std::shared_ptr<Character>> Tile::FindCharacters(std::function<bool(std::shared_ptr<Character>& e)> query)
+  std::vector<std::shared_ptr<Character>> Tile::FindHittableCharacters(std::function<bool(std::shared_ptr<Character>& e)> query)
   {
     std::vector<std::shared_ptr<Character>> res;
 
@@ -760,7 +789,7 @@ namespace Battle {
 
       if (spell_iter != spells.end()) continue;
 
-      if (query(*iter) && (*iter)->IsHitboxAvailable()) {
+      if ((*iter)->IsHitboxAvailable() && query(*iter)) {
         res.push_back(*iter);
       }
     }
@@ -768,7 +797,7 @@ namespace Battle {
     return res;
   }
 
-  std::vector<std::shared_ptr<Obstacle>> Tile::FindObstacles(std::function<bool(std::shared_ptr<Obstacle>& e)> query)
+  std::vector<std::shared_ptr<Obstacle>> Tile::FindHittableObstacles(std::function<bool(std::shared_ptr<Obstacle>& e)> query)
   {
     std::vector<std::shared_ptr<Obstacle>> res;
 
@@ -781,7 +810,7 @@ namespace Battle {
       if (spell_iter == spells.end()) continue;
 
       std::shared_ptr<Obstacle> as_obstacle = std::dynamic_pointer_cast<Obstacle>(*iter);
-      if (as_obstacle && query(as_obstacle) && as_obstacle->IsHitboxAvailable()) {
+      if (as_obstacle && as_obstacle->IsHitboxAvailable() && query(as_obstacle)) {
         res.push_back(as_obstacle);
       }
     }
@@ -898,10 +927,10 @@ namespace Battle {
       str = str + "direction_down";
       break;
     case TileState::directionLeft:
-      str = str + "direction_left";
+      str = str + (isPerspectiveFlipped? "direction_right" : "direction_left");
       break;
     case TileState::directionRight:
-      str = str + "direction_right";
+      str = str + (isPerspectiveFlipped ? "direction_left" : "direction_right");
       break;
     case TileState::directionUp:
       str = str + "direction_up";
@@ -1043,6 +1072,7 @@ namespace Battle {
           // We make sure to apply any tile bonuses at this stage
           if (GetState() == TileState::holy) {
             Hit::Properties props = attacker->GetHitboxProperties();
+            props.damage += 1; // rounds integer damage up -> `1 / 2 = 0`, but `(1 + 1) / 2 = 1`
             props.damage /= 2;
             attacker->SetHitboxProperties(props);
           }

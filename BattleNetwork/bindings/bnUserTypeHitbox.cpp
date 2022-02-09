@@ -19,10 +19,10 @@ void DefineHitboxUserTypes(sol::state& state, sol::table& battle_namespace) {
       wrappedSpell.Own();
       return wrappedSpell;
     }),
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "Hitbox", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "Hitbox", key );
     },
     "set_callbacks", [](WeakWrapper<HitboxSpell>& spell, sol::object luaAttackCallbackObject, sol::object luaCollisionCallbackObject) {
@@ -107,22 +107,29 @@ void DefineHitboxUserTypes(sol::state& state, sol::table& battle_namespace) {
     )
   );
 
+  auto createHitProps = [](int damage, Hit::Flags flags, Element element, Element secondaryElement, std::optional<Hit::Context> contextOptional, Hit::Drag drag) {
+    Hit::Properties props = { damage, flags, element, secondaryElement, 0, drag };
+
+    if (contextOptional) {
+      props.context = *contextOptional;
+      props.aggressor = props.context.aggressor;
+    }
+
+    return props;
+  };
 
   state.new_usertype<Hit::Properties>("HitProps",
-    sol::factories([](int damage, Hit::Flags flags, Element element, std::optional<Hit::Context> contextOptional, Hit::Drag drag) {
-      Hit::Properties props = { damage, flags, element, 0, drag };
-
-      if (contextOptional) {
-        props.context = *contextOptional;
-        props.aggressor = props.context.aggressor;
+    sol::factories(
+      createHitProps,
+      [createHitProps] (int damage, Hit::Flags flags, Element element, std::optional<Hit::Context> contextOptional, Hit::Drag drag) {
+        return createHitProps(damage, flags, element, Element::none, contextOptional, drag);
       }
-
-      return props;
-    }),
+    ),
     "aggressor", &Hit::Properties::aggressor,
     "damage", &Hit::Properties::damage,
     "drag", &Hit::Properties::drag,
     "element", &Hit::Properties::element,
+    "secondary_element", &Hit::Properties::secondaryElement,
     "flags", &Hit::Properties::flags
   );
 
@@ -139,7 +146,9 @@ void DefineHitboxUserTypes(sol::state& state, sol::table& battle_namespace) {
     "Breaking", Hit::breaking,
     "Bubble", Hit::bubble,
     "Freeze", Hit::freeze,
-    "Drag", Hit::drag
+    "Drag", Hit::drag,
+    "Blind", Hit::blind,
+    "Confuse", Hit::confuse
   );
 
   state.new_usertype<Hit::Drag>("Drag",
@@ -148,10 +157,10 @@ void DefineHitboxUserTypes(sol::state& state, sol::table& battle_namespace) {
       [] { return Hit::Drag{ Direction::none, 0 }; }
     ),
     "None", sol::property([] { return Hit::Drag{ Direction::none, 0 }; }),
-    sol::meta_function::index, []( sol::table table, const std::string key ) { 
+    sol::meta_function::index, []( sol::table table, const std::string key ) {
       ScriptResourceManager::PrintInvalidAccessMessage( table, "Drag", key );
     },
-    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) { 
+    sol::meta_function::new_index, []( sol::table table, const std::string key, sol::object obj ) {
       ScriptResourceManager::PrintInvalidAssignMessage( table, "Drag", key );
     },
     "direction", &Hit::Drag::dir,

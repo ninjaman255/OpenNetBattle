@@ -36,8 +36,10 @@ void TimeFreezeBattleState::CleanupStuntDouble()
   if (tfEvents.size()) {
     auto iter = tfEvents.begin();
 
+    BattleSceneBase& scene = GetScene();
     if (iter->stuntDouble) {
-      GetScene().GetField()->DeallocEntity(iter->stuntDouble->GetID());
+      scene.UntrackMobCharacter(iter->stuntDouble);
+      scene.GetField()->DeallocEntity(iter->stuntDouble->GetID());
     }
   }
 }
@@ -45,7 +47,7 @@ void TimeFreezeBattleState::CleanupStuntDouble()
 std::shared_ptr<Character> TimeFreezeBattleState::CreateStuntDouble(std::shared_ptr<Character> from)
 {
   CleanupStuntDouble();
-  auto stuntDouble = std::make_shared<StuntDouble>(from);
+  std::shared_ptr<StuntDouble> stuntDouble = std::make_shared<StuntDouble>(from);
   stuntDouble->Init();
   return stuntDouble;
 }
@@ -56,20 +58,15 @@ void TimeFreezeBattleState::SkipToAnimateState()
   ExecuteTimeFreeze();
 }
 
-void TimeFreezeBattleState::SkipFrame()
-{
-  skipFrame = true;
-}
-
 void TimeFreezeBattleState::ProcessInputs()
 {
   size_t player_idx = 0;
-  for (auto& p : this->GetScene().GetAllPlayers()) {
+  for (std::shared_ptr<Player>& p : this->GetScene().GetAllPlayers()) {
     p->InputState().Process();
 
     if (p->InputState().Has(InputEvents::pressed_use_chip)) {
       Logger::Logf(LogLevel::info, "InputEvents::pressed_use_chip for player %i", player_idx);
-      auto cardsUI = p->GetFirstComponent<PlayerSelectedCardsUI>();
+      std::shared_ptr<PlayerSelectedCardsUI> cardsUI = p->GetFirstComponent<PlayerSelectedCardsUI>();
       if (cardsUI) {
         auto maybe_card = cardsUI->Peek();
 
@@ -78,7 +75,7 @@ void TimeFreezeBattleState::ProcessInputs()
           const Battle::Card& card = *maybe_card;
 
           if (card.IsTimeFreeze() && CanCounter(p)) {
-            if (auto action = CardToAction(card, p, &GetScene().getController().CardPackagePartitioner(), card.props)) {
+            if (std::shared_ptr<CardAction> action = CardToAction(card, p, &GetScene().getController().CardPackagePartitioner(), card.props)) {
               OnCardActionUsed(action, CurrentTime::AsMilli());
               cardsUI->DropNextCard();
             }
@@ -95,9 +92,10 @@ void TimeFreezeBattleState::ProcessInputs()
 void TimeFreezeBattleState::onStart(const BattleSceneState*)
 {
   Logger::Logf(LogLevel::info, "TimeFreezeBattleState::onStart");
-  GetScene().GetSelectedCardsUI().Hide();
-  GetScene().GetField()->ToggleTimeFreeze(true); // freeze everything on the field but accept hits
-  GetScene().StopBattleStepTimer();
+  BattleSceneBase& scene = GetScene();
+  scene.GetSelectedCardsUI().Hide();
+  scene.GetField()->ToggleTimeFreeze(true); // freeze everything on the field but accept hits
+  scene.StopBattleStepTimer();
   currState = startState;
 
   if (tfEvents.empty()) return;
@@ -110,11 +108,12 @@ void TimeFreezeBattleState::onStart(const BattleSceneState*)
 
 void TimeFreezeBattleState::onEnd(const BattleSceneState*)
 {
+  BattleSceneBase& scene = GetScene();
   Logger::Logf(LogLevel::info, "TimeFreezeBattleState::onEnd");
-  GetScene().GetSelectedCardsUI().Reveal();
-  GetScene().GetField()->ToggleTimeFreeze(false);
-  GetScene().HighlightTiles(false);
-  GetScene().StartBattleStepTimer();
+  scene.GetSelectedCardsUI().Reveal();
+  scene.GetField()->ToggleTimeFreeze(false);
+  scene.HighlightTiles(false);
+  scene.StartBattleStepTimer();
   tfEvents.clear();
   summonStart = false;
   summonTick = frames(0);
@@ -123,20 +122,15 @@ void TimeFreezeBattleState::onEnd(const BattleSceneState*)
 
 void TimeFreezeBattleState::onUpdate(double elapsed)
 {
-  if (skipFrame) {
-    skipFrame = false;
-    return;
-  }
-
-  if (elapsed > 0.0) {
-    GetScene().IncrementFrame();
-  }
-
   ProcessInputs();
 
   if (summonStart) {
     summonTick += frames(1);
   }
+
+  BattleSceneBase& scene = GetScene();
+
+  scene.GetField()->Update(elapsed);
 
   switch (currState) {
   case state::fadein:
@@ -162,7 +156,7 @@ void TimeFreezeBattleState::onUpdate(double elapsed)
     }
 
     if (summonTick >= summonTextLength) {
-      GetScene().HighlightTiles(true); // re-enable tile highlighting for new entities
+      scene.HighlightTiles(true); // re-enable tile highlighting for new entities
       currState = state::animate; // animate this attack
 
       // Resize the time freeze queue to a max of 2 attacks
@@ -172,7 +166,7 @@ void TimeFreezeBattleState::onUpdate(double elapsed)
       ExecuteTimeFreeze();
     }
 
-    for (auto& e : tfEvents) {
+    for (TimeFreezeBattleState::EventData& e : tfEvents) {
       if (e.animateCounter) {
         e.alertFrameCount += frames(1);
       }
@@ -201,7 +195,9 @@ void TimeFreezeBattleState::onUpdate(double elapsed)
       }
       else{
         first->user->Reveal();
-        GetScene().GetField()->DeallocEntity(first->stuntDouble->GetID());
+        scene.UntrackMobCharacter(first->stuntDouble);
+        scene.GetField()->DeallocEntity(first->stuntDouble->GetID());
+        first->action->EndAction();
 
         if (tfEvents.size() == 1) {
           // This is the only event in the list
@@ -220,7 +216,6 @@ void TimeFreezeBattleState::onUpdate(double elapsed)
     }
     break;
   }
-  GetScene().GetField()->Update(elapsed);
 }
 
 void TimeFreezeBattleState::onDraw(sf::RenderTexture& surface)
@@ -230,6 +225,7 @@ void TimeFreezeBattleState::onDraw(sf::RenderTexture& surface)
 
   if (tfEvents.empty()) return;
 
+  BattleSceneBase& scene = GetScene();
   const auto& first = tfEvents.begin();
 
   double tfcTimerScale = swoosh::ease::linear(summonTick.asSeconds().value, summonTextLength.asSeconds().value, 1.0);
@@ -260,28 +256,28 @@ void TimeFreezeBattleState::onDraw(sf::RenderTexture& surface)
     summonsLabel.setOrigin(summonsLabel.GetLocalBounds().width, summonsLabel.GetLocalBounds().height*0.5f);
   }
 
-  GetScene().DrawCustGauage(surface);
-  surface.draw(GetScene().GetCardSelectWidget());
+  scene.DrawCustGauage(surface);
+  surface.draw(scene.GetCardSelectWidget());
 
   summonsLabel.SetColor(sf::Color::Black);
   summonsLabel.setPosition(position.x + 2.f, position.y + 2.f);
-  GetScene().DrawWithPerspective(summonsLabel, surface);
+  scene.DrawWithPerspective(summonsLabel, surface);
 
   summonsLabel.SetColor(sf::Color::White);
   summonsLabel.setPosition(position);
-  GetScene().DrawWithPerspective(summonsLabel, surface);
+  scene.DrawWithPerspective(summonsLabel, surface);
 
   if (currState == state::display_name) {
     // draw TF bar underneath
     bar.setPosition(position + sf::Vector2f(0.f + 2.f, 12.f + 2.f));
     bar.setFillColor(sf::Color::Black);
-    GetScene().DrawWithPerspective(bar, surface);
+    scene.DrawWithPerspective(bar, surface);
 
     bar.setPosition(position + sf::Vector2f(0.f, 12.f));
 
     sf::Uint8 b = (sf::Uint8)swoosh::ease::interpolate((1.0-tfcTimerScale), 0.0, 255.0);
     bar.setFillColor(sf::Color(255, 255, b));
-    GetScene().DrawWithPerspective(bar, surface);
+    scene.DrawWithPerspective(bar, surface);
   }
 
   // draw the !! sprite
@@ -297,7 +293,7 @@ void TimeFreezeBattleState::onDraw(sf::RenderTexture& surface)
 
       alertSprite.setScale(2.0f, 2.0f * (float)scale);
 
-      if (e.team == Team::red) {
+      if (e.team == Team::red || e.team == Team::unknown) {
         alertSprite.setOrigin(0, alertSprite.getLocalBounds().height * 0.5f);
       }
       else {
@@ -305,7 +301,7 @@ void TimeFreezeBattleState::onDraw(sf::RenderTexture& surface)
       }
 
       alertSprite.setPosition(position);
-      GetScene().DrawWithPerspective(alertSprite, surface);
+      scene.DrawWithPerspective(alertSprite, surface);
     }
   }
 }
@@ -424,7 +420,7 @@ const bool TimeFreezeBattleState::CanCounter(std::shared_ptr<Character> user)
 
   if (!tfEvents.empty()) {
     // only opposing players can counter
-    auto lastActor = tfEvents.begin()->action->GetActor();
+    std::shared_ptr<Character> lastActor = tfEvents.begin()->action->GetActor();
     if (!lastActor->Teammate(user->GetTeam())) {
       playerCountered = true;
       Logger::Logf(LogLevel::info, "Player was countered!");

@@ -78,14 +78,13 @@ Overworld::Homepage::Homepage(swoosh::ActivityController& controller) :
 
     // search for warps
     for (auto& tileObject : layer.GetTileObjects()) {
-      if (tileObject.name == "Home Warp") {
+      switch (tileObject.type) {
+      case ObjectType::home_warp: {
         auto warpLayerPos = tileObject.position + map.ScreenToWorld(sf::Vector2f(0, tileObject.size.y / 2.0f));
         spawnPos = { warpLayerPos.x, warpLayerPos.y, z };
-
-        auto screenPos = GetMap().WorldToScreen(spawnPos);
-        GetMinimap().SetHomepagePosition(screenPos, false);
+        break;
       }
-      else if (tileObject.name == "Net Warp") {
+      case ObjectType::server_warp: {
         auto centerPos = tileObject.position + map.ScreenToWorld(sf::Vector2f(0, tileObject.size.y / 2.0f));
         auto tileSize = map.GetTileSize();
 
@@ -95,9 +94,10 @@ Overworld::Homepage::Homepage(swoosh::ActivityController& controller) :
           z
         );
         netWarpObjectId = tileObject.id;
-
-        auto screenPos = GetMap().WorldToScreen({ centerPos.x, centerPos.y, z });
-        GetMinimap().AddWarpPosition(screenPos, false);
+        break;
+      }
+      default:
+        break;
       }
     }
   }
@@ -110,7 +110,7 @@ Overworld::Homepage::Homepage(swoosh::ActivityController& controller) :
     mrprog->SetSolid(true);
     mrprog->SetCollisionRadius(5);
 
-    // we ensure pointer to mrprog is alive because when we interact, 
+    // we ensure pointer to mrprog is alive because when we interact,
     // mrprog must've been alive to interact in the first place...
     mrprog->SetInteractCallback([mrprog = mrprog.get(), this](const auto& with, const auto& event) {
       // Face them
@@ -211,6 +211,7 @@ Overworld::Homepage::Homepage(swoosh::ActivityController& controller) :
               [this](auto status, auto maxPayloadSize) { UpdateServerStatus(status, maxPayloadSize); }
             );
             Net().AddHandler(remoteAddress, packetProcessor);
+            EnableNetWarps(false);
 
             auto& menuSystem = GetMenuSystem();
             menuSystem.SetNextSpeaker(face, "resources/ow/prog/prog_mug.animation");
@@ -326,12 +327,10 @@ void Overworld::Homepage::onUpdate(double elapsed)
 
   if (Input().Has(InputEvents::pressed_shoulder_right) && !IsInputLocked()) {
     PlayerMeta& meta = getController().PlayerPackagePartitioner().GetPartition(Game::LocalPartition).FindPackageByID(GetCurrentNaviID());
-    const std::string& image = meta.GetMugshotTexturePath();
-    const std::string& anim = meta.GetMugshotAnimationPath();
-    auto mugshot = Textures().LoadFromFile(image);
+    auto mugshot = Textures().LoadFromFile(meta.GetMugshotTexturePath());
 
     auto& menuSystem = GetMenuSystem();
-    menuSystem.SetNextSpeaker(sf::Sprite(*mugshot), anim);
+    menuSystem.SetNextSpeaker(sf::Sprite(*mugshot), meta.GetMugshotAnimationPath());
     menuSystem.EnqueueMessage("This is your homepage.");
     menuSystem.EnqueueMessage("You can edit it anyway you like!");
 

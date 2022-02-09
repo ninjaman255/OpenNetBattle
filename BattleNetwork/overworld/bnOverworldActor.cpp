@@ -111,6 +111,7 @@ void Overworld::Actor::PlayAnimation(const std::string& name, bool loop)
   }
 
   anim << name;
+  playingCustomAnimation = true;
 
   if (loop) {
     anim << Animator::Mode::Loop;
@@ -125,15 +126,6 @@ void Overworld::Actor::PlayAnimation(const std::string& name, bool loop)
 
     anim.AddCallback(frame, callback, true);
   }
-
-  // if the animation was forcefully changed
-  anim.SetInterruptCallback([this] {
-    playingCustomAnimation = false;
-  });
-
-  // must be set to true after `anim << name`
-  // otherwise an interrupt callback can set this to false
-  playingCustomAnimation = true;
 }
 
 void Overworld::Actor::SetWalkSpeed(float speed)
@@ -502,6 +494,7 @@ void Overworld::Actor::UpdateAnimationState(float elapsed) {
     return;
   }
 
+  playingCustomAnimation = false;
   std::string stateStr;
 
   auto findValidAnimThunk = [this](const MovementState& state) {
@@ -540,7 +533,7 @@ void Overworld::Actor::UpdateAnimationState(float elapsed) {
   // we're going to be syncing the time so this is required if changing sprites
   anim << stateStr << Animator::Mode::Loop;
 
-  animProgress += elapsed * std::abs(anim.GetPlaybackSpeed());
+  animProgress += from_seconds(elapsed * std::abs(anim.GetPlaybackSpeed()));
 
   if (!lastStateStr.empty()) {
     anim.SyncTime(animProgress);
@@ -548,7 +541,7 @@ void Overworld::Actor::UpdateAnimationState(float elapsed) {
   }
 
   if (lastStateStr != stateStr) {
-    animProgress = 0; // reset animation
+    animProgress = frames(0); // reset animation
     anim.SyncTime(animProgress);
 
     // we have changed states
